@@ -64,27 +64,28 @@ class Command {
 		if (!commandObj) return false;
 		let param = initParam(msg, command, args, this.main, context);
 
-		if (commandObj.owner && msg.author.id === this.main.config.owner) {
-			await adminCommands[command].execute(param);
+		// The configured self-host owner is the bot superuser and may run every admin command.
+		if (msg.author.id === this.main.config.owner) {
+			await commandObj.execute(param);
 			return true;
 		} else if (this.main.config.modChannels.includes(msg.channel.id)) {
 			if (
 				commandObj.admin &&
 				this.main.config.role.admin.find((id) => msg.member?.roles.includes(id))
 			) {
-				await adminCommands[command].execute(param);
+				await commandObj.execute(param);
 				return true;
 			} else if (
 				commandObj.manager &&
 				this.main.config.role.manager.find((id) => msg.member?.roles.includes(id))
 			) {
-				await adminCommands[command].execute(param);
+				await commandObj.execute(param);
 				return true;
 			} else if (
 				commandObj.helper &&
 				this.main.config.role.helper.find((id) => msg.member?.roles.includes(id))
 			) {
-				await adminCommands[command].execute(param);
+				await commandObj.execute(param);
 				return true;
 			}
 		}
