@@ -145,7 +145,15 @@ exports.getReward = async function (id, uid, _con, rewardType, rewardId, rewardC
 				count: global.toFancyNum(rewardCount),
 				emoji: config.emoji.cowoncy,
 				apply: async ({ session } = {}) => {
-					await mongoNumeric.add('cowoncy', { id }, 'money', rewardCount, { session, upsert: true });
+					const cowoncy = await mongo.collection('cowoncy');
+					await mongoNumeric.add(
+						cowoncy,
+						{ id },
+						'money',
+						rewardCount,
+						{ session, upsert: true },
+						{ id }
+					);
 				},
 			};
 		case 'item':
