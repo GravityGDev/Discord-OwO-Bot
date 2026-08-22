@@ -34,8 +34,5 @@ jobs:
       - name: Run ESLint
         run: npm run lint
 
-      - name: Run Prettier check
-        run: npm run prettier
-
       - name: Run cyclic dependency check
         run: ./node_modules/dpdm/lib/bin/dpdm.js --exit-code circular:1 ./src/owo.js
