@@ -8,9 +8,9 @@
 const Base = require('eris-sharder').Base;
 const EventHandler = require('./eventHandlers/EventHandler.js');
 
-// Discordbots.org api
+// Discordbots.org API is optional for local/debug deployments.
 const DBL = require('dblapi.js');
-const dbl = new DBL(process.env.DBL_TOKEN);
+const dbl = process.env.DBL_TOKEN ? new DBL(process.env.DBL_TOKEN) : null;
 
 class OwO extends Base {
 	constructor(bot) {
