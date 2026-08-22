@@ -18,10 +18,9 @@ module.exports = class WallpaperPage extends PageClass {
 	}
 
 	async totalPages() {
-		let sql = 'SELECT COUNT(bid) AS count FROM backgrounds WHERE active = 1;';
-		let result = await this.p.query(sql);
-		let pages = Math.ceil(result[0].count / perPage);
-		return pages;
+		const backgrounds = await this.p.mongo.collection('backgrounds');
+		const count = await backgrounds.countDocuments({ active: 1 });
+		return Math.ceil(count / perPage);
 	}
 
 	async getPage(page, embed) {
@@ -30,14 +29,25 @@ module.exports = class WallpaperPage extends PageClass {
 			'Purchase a wallpaper for your profile!\n- **`owo shop wp {page}`** to view the wallpaper as images\n- **`owo buy {id}`** to buy an item\n- **`owo wallpaper`** to view your wallpapers\n- **`owo profile set wallpaper {id}`** to use it\n' +
 			'═'.repeat(this.charLen + 2) +
 			'\n';
-		let sql = `SELECT b.*,user_backgrounds.uid  FROM backgrounds b LEFT JOIN (user INNER JOIN user_backgrounds ON user.uid = user_backgrounds.uid AND id = ${
-			this.p.msg.author.id
-		}) ON b.bid = user_backgrounds.bid WHERE b.active = 1 LIMIT ${perPage} OFFSET ${
-			perPage * (page - 1)
-		};`;
-		let result = await this.p.query(sql);
+
+		const uid = await this.p.global.getUid(this.p.msg.author.id);
+		const backgrounds = await this.p.mongo.collection('backgrounds');
+		const userBackgrounds = await this.p.mongo.collection('user_backgrounds');
+		const result = await backgrounds
+			.find({ active: 1 })
+			.skip(perPage * (page - 1))
+			.limit(perPage)
+			.toArray();
+		const bids = result.map((wallpaper) => wallpaper.bid);
+		const ownedRows = bids.length
+			? await userBackgrounds
+					.find({ uid, bid: { $in: bids } }, { projection: { bid: 1 } })
+					.toArray()
+			: [];
+		const owned = new Set(ownedRows.map((row) => row.bid));
+
 		for (let i in result) {
-			let wallpaper = result[i];
+			const wallpaper = result[i];
 			embed.description += this.toItem({
 				id: idOffset + wallpaper.bid,
 				emoji: pictureEmoji,
@@ -45,7 +55,7 @@ module.exports = class WallpaperPage extends PageClass {
 				url: `${process.env.GEN_HOST}/background/${wallpaper.bid}.png`,
 				price: this.p.global.toShortNum(wallpaper.price),
 				priceEmoji: '<:cowoncy:416043450337853441>',
-				lineThrough: !!wallpaper.uid,
+				lineThrough: owned.has(wallpaper.bid),
 			});
 		}
 		return embed;
