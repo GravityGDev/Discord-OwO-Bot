@@ -28,33 +28,57 @@ module.exports = new CommandInterface({
 	six: 500,
 
 	execute: async function (p) {
-		let client = p.client,
-			msg = p.msg;
-		let sql = 'SELECT COUNT(*) user,sum(count) AS total FROM user;';
-		sql +=
-			'SELECT SUM(common) AS common, SUM(uncommon) AS uncommon, SUM(rare) AS rare, SUM(epic) AS epic, SUM(mythical) AS mythical, SUM(legendary) AS legendary FROM animal_count;';
-		sql += 'SELECT command FROM disabled WHERE channel = ' + msg.channel.id + ';';
+		const client = p.client;
+		const msg = p.msg;
+		const userCollection = await p.mongo.collection('user');
+		const animalCounts = await p.mongo.collection('animal_count');
+		const disabledCollection = await p.mongo.collection('disabled');
 
-		let { guilds, users } = await fetchInfo();
+		const { guilds, users } = await fetchInfo();
+		const ping = p.client.shards.get(p.client.guildShardMap[p.msg.channel.guild.id]).latency;
 
-		let ping = p.client.shards.get(p.client.guildShardMap[p.msg.channel.guild.id]).latency;
+		const userCount = await userCollection.countDocuments({});
+		const userTotals = await userCollection
+			.aggregate([{ $group: { _id: null, total: { $sum: { $ifNull: ['$count', 0] } } } }])
+			.toArray();
+		const animalTotals = await animalCounts
+			.aggregate([
+				{
+					$group: {
+						_id: null,
+						common: { $sum: { $ifNull: ['$common', 0] } },
+						uncommon: { $sum: { $ifNull: ['$uncommon', 0] } },
+						rare: { $sum: { $ifNull: ['$rare', 0] } },
+						epic: { $sum: { $ifNull: ['$epic', 0] } },
+						mythical: { $sum: { $ifNull: ['$mythical', 0] } },
+						legendary: { $sum: { $ifNull: ['$legendary', 0] } },
+					},
+				},
+			])
+			.toArray();
+		const disabledRows = await disabledCollection
+			.find({ channel: String(msg.channel.id) }, { projection: { command: 1 } })
+			.toArray();
 
-		let rows = await p.query(sql);
-		let totalAnimals =
-			parseInt(rows[1][0].common) +
-			parseInt(rows[1][0].uncommon) +
-			parseInt(rows[1][0].rare) +
-			parseInt(rows[1][0].epic) +
-			parseInt(rows[1][0].mythical) +
-			parseInt(rows[1][0].legendary);
-		let disabled = '';
-		for (let i in rows[2]) {
-			disabled += rows[2][i].command + ', ';
-		}
-		disabled = disabled.slice(0, -2);
+		const counts = animalTotals[0] || {
+			common: 0,
+			uncommon: 0,
+			rare: 0,
+			epic: 0,
+			mythical: 0,
+			legendary: 0,
+		};
+		const totalAnimals =
+			Number(counts.common || 0) +
+			Number(counts.uncommon || 0) +
+			Number(counts.rare || 0) +
+			Number(counts.epic || 0) +
+			Number(counts.mythical || 0) +
+			Number(counts.legendary || 0);
+		let disabled = disabledRows.map((row) => row.command).join(', ');
 		if (disabled == '') disabled = 'no disabled commands';
 
-		let embed = {
+		const embed = {
 			description:
 				"Here's a little bit of information! If you need help with commands, type `owo help`.",
 			color: p.config.embed_color,
@@ -81,23 +105,23 @@ module.exports = new CommandInterface({
 					name: 'Global information',
 					value:
 						'```md\n<TotalOwOs:  ' +
-						p.global.toFancyNum(rows[0][0].total) +
+						p.global.toFancyNum(userTotals[0]?.total || 0) +
 						'>\n<OwOUsers:   ' +
-						p.global.toFancyNum(rows[0][0].user) +
+						p.global.toFancyNum(userCount) +
 						'>``````md\n<animalsCaught: ' +
 						p.global.toFancyNum(totalAnimals) +
 						'>\n<common: ' +
-						p.global.toFancyNum(rows[1][0].common) +
+						p.global.toFancyNum(counts.common || 0) +
 						'>\n<uncommon: ' +
-						p.global.toFancyNum(rows[1][0].uncommon) +
+						p.global.toFancyNum(counts.uncommon || 0) +
 						'>\n<rare: ' +
-						p.global.toFancyNum(rows[1][0].rare) +
+						p.global.toFancyNum(counts.rare || 0) +
 						'>\n<epic: ' +
-						p.global.toFancyNum(rows[1][0].epic) +
+						p.global.toFancyNum(counts.epic || 0) +
 						'>\n<mythical: ' +
-						p.global.toFancyNum(rows[1][0].mythical) +
+						p.global.toFancyNum(counts.mythical || 0) +
 						'>\n<legendary: ' +
-						p.global.toFancyNum(rows[1][0].legendary) +
+						p.global.toFancyNum(counts.legendary || 0) +
 						'>```',
 				},
 				{
