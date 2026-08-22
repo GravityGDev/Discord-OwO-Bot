@@ -59,6 +59,32 @@ MONGODB_MIN_POOL_SIZE=0
 MONGODB_SERVER_SELECTION_TIMEOUT=10000
 ```
 
+## Fresh MongoDB initialization
+
+A brand-new Mongo database needs the base animal definitions before the bot can enable its command/event handlers. Seed those directly into MongoDB with:
+
+```bash
+npm run seed:mongo-static
+```
+
+The seeder is idempotent. It upserts the bundled base animal definitions and verifies they exist afterward, so it is safe to run again.
+
+If you are importing a complete existing OwO database from MySQL, the migration script will copy the existing `animals` table as well. Running the static seeder afterward only refreshes the bundled base definitions and does not delete migrated rows.
+
+Before starting the Discord bot on a host, run:
+
+```bash
+npm run preflight:runtime
+```
+
+The preflight verifies:
+
+- `BOT_TOKEN` and the Mongo URI are configured
+- MongoDB connects and indexes initialize
+- the base animal collection is populated
+- Mongo transactions are supported by performing and verifying a rollback
+- optional integrations are reported as configured or disabled without printing secret values
+
 ## Data migration
 
 Back up MySQL/MariaDB and Redis before running either source migration.
@@ -82,7 +108,7 @@ The migration branch CI now performs three important classes of checks:
 
 1. syntax, lint, circular-dependency and strict Mongo-only runtime auditing
 2. a clean dependency-resolution/install smoke test for fresh deployments
-3. a real MongoDB replica-set smoke test that exercises indexes, transactions, rollback and precision-safe large-integer Cowoncy arithmetic
+3. a real MongoDB replica-set smoke test that runs the static seeder, exercises indexes/transactions/rollback/precision-safe Cowoncy arithmetic, and runs the deployment preflight
 
 The runtime audit can also be run locally:
 
@@ -96,12 +122,14 @@ It must report zero legacy SQL/MySQL runtime markers.
 
 1. Create a MongoDB Atlas database or another replica set.
 2. Create `.env` from `.env.example` and set `BOT_TOKEN`, `MONGODB_URI` and `MONGODB_DB`.
-3. If preserving old bot data, temporarily add the MySQL/Redis source credentials and run the migration scripts.
-4. Compare critical collection counts and spot-check balances, animals, quests, inventories, marriages, battle teams, weapons and guild settings.
-5. Remove the temporary source-database credentials from the runtime `.env` after import verification.
-6. Perform a clean dependency install on the deployment host.
-7. Start the bot and confirm the log reaches `[Startup] MongoDB runtime ready; event handlers enabled`.
-8. Smoke-test read commands and mutation commands, especially Cowoncy transfers, daily/claim, hunt/HuntBot, zoo sell/sacrifice, inventory/trade, lootboxes, battle/team operations, rewards/events/giveaways and rankings.
-9. Exercise concurrent mutation paths to confirm transaction behavior under duplicate requests/shards.
-10. Once the real source data is imported and verified, remove migration-only MySQL/Redis packages.
-11. Only after those checks should the migration PR be marked ready for merge and the old database services retired.
+3. If this is a fresh database, run `npm run seed:mongo-static`.
+4. If preserving old bot data, temporarily add the MySQL/Redis source credentials and run the migration scripts.
+5. Compare critical collection counts and spot-check balances, animals, quests, inventories, marriages, battle teams, weapons and guild settings.
+6. Remove the temporary source-database credentials from the runtime `.env` after import verification.
+7. Perform a clean dependency install on the deployment host.
+8. Run `npm run preflight:runtime` and do not start the bot until it passes.
+9. Start the bot and confirm the log reaches `[Startup] MongoDB runtime ready; event handlers enabled`.
+10. Smoke-test read commands and mutation commands, especially Cowoncy transfers, daily/claim, hunt/HuntBot, zoo sell/sacrifice, inventory/trade, lootboxes, battle/team operations, rewards/events/giveaways and rankings.
+11. Exercise concurrent mutation paths to confirm transaction behavior under duplicate requests/shards.
+12. Once the real source data is imported and verified, remove migration-only MySQL/Redis packages.
+13. Only after those checks should the migration PR be marked ready for merge and the old database services retired.
