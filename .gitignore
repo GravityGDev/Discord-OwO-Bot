@@ -21,6 +21,9 @@ node_modules/
 # log files
 .log
 
+# Runtime-generated migration reports
+runtime/
+
 # Runtime environment files
 .env
 secret/env
