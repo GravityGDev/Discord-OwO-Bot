@@ -10,6 +10,13 @@ const io = require('socket.io-client');
 class StreamSocket {
 	constructor(main) {
 		this.main = main;
+		this.socket = null;
+
+		if (!process.env.STREAM_SOCKET) {
+			console.log('[StreamSocket] Disabled; STREAM_SOCKET is not configured');
+			return;
+		}
+
 		this.socket = io(process.env.STREAM_SOCKET, {
 			auth: {
 				token: process.env.STREAM_TOKEN,
@@ -31,6 +38,7 @@ class StreamSocket {
 	}
 
 	streamEmit(author, key) {
+		if (!this.socket) return;
 		this.socket.emit('press-key', {
 			key,
 			user: {
