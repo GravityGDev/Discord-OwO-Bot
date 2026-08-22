@@ -17,6 +17,10 @@ setTimeout(() => {
 	enableDistortedTier = false;
 }, 21600000);
 
+function rankHasAnimals(rank) {
+	return Boolean(rank?.animals?.length);
+}
+
 function randAnimal(opts = {}) {
 	const event = getEventAnimals();
 	opts.event = event;
@@ -31,7 +35,9 @@ function randAnimal(opts = {}) {
 		animalName = getRandomEventAnimal(event);
 	}
 
-	return animals.getAnimal(animalName);
+	const animal = animals.getAnimal(animalName);
+	if (!animal) throw new Error(`No animal definition available for hunt rank ${rankName}`);
+	return animal;
 }
 
 function getRandomEventAnimal(event) {
@@ -47,6 +53,7 @@ function getRandomEventAnimal(event) {
 
 function getRandomRank(rarities) {
 	const totalRarity = Object.values(rarities).reduce((sum, val) => sum + val, 0);
+	if (totalRarity <= 0) throw new Error('No huntable animal ranks are available');
 	const rand = Math.random() * totalRarity;
 	let total = 0;
 	for (let rank in rarities) {
@@ -60,34 +67,44 @@ function getRarities(opts) {
 	const ranks = animals.getRanks();
 	for (let key in ranks) {
 		const rank = ranks[key];
-		rarity[key] = rank.conditional ? 0 : rank.rarity;
+		rarity[key] = rank.conditional || !rankHasAnimals(rank) ? 0 : rank.rarity;
 	}
 	if (opts.patreon) {
 		const patreon = animals.getRank('patreon');
-		rarity[patreon.id] = patreon.rarity;
-		rarity.common -= patreon.rarity;
+		if (rankHasAnimals(patreon)) {
+			rarity[patreon.id] = patreon.rarity;
+			rarity.common -= patreon.rarity;
+		}
 		const cpatreon = animals.getRank('cpatreon');
-		rarity[cpatreon.id] = cpatreon.rarity;
-		rarity.common -= cpatreon.rarity;
+		if (rankHasAnimals(cpatreon)) {
+			rarity[cpatreon.id] = cpatreon.rarity;
+			rarity.common -= cpatreon.rarity;
+		}
 	}
 	if (opts.gem) {
 		const gem = animals.getRank('gem');
-		let gemRarity = gem.rarity;
-		if (opts.lucky) gemRarity *= opts.lucky.amount;
-		rarity[gem.id] = gemRarity;
-		rarity.common -= gemRarity;
+		if (rankHasAnimals(gem)) {
+			let gemRarity = gem.rarity;
+			if (opts.lucky) gemRarity *= opts.lucky.amount;
+			rarity[gem.id] = gemRarity;
+			rarity.common -= gemRarity;
+		}
 	}
 	if (enableDistortedTier && opts.manual) {
 		const distorted = animals.getRank('distorted');
-		rarity[distorted.id] = distorted.rarity;
-		rarity.common -= distorted.rarity;
+		if (rankHasAnimals(distorted)) {
+			rarity[distorted.id] = distorted.rarity;
+			rarity.common -= distorted.rarity;
+		}
 	}
 	if (opts.huntbot) {
 		const bot = animals.getRank('bot');
-		rarity[bot.id] = opts.huntbot;
-		rarity.common -= opts.huntbot;
+		if (rankHasAnimals(bot)) {
+			rarity[bot.id] = opts.huntbot;
+			rarity.common -= opts.huntbot;
+		}
 	}
-	if (opts.event) {
+	if (opts.event?.length) {
 		let specialRarity = opts.event.reduce((sum, val) => sum + val.rarity, 0);
 		if (opts.special) specialRarity *= 2;
 		if (opts.huntbot) specialRarity /= 4;
@@ -103,9 +120,10 @@ function getEventAnimals() {
 	if (!event || !event.animals) return [];
 	const eventAnimals = [];
 	event.animals.forEach((animal) => {
+		if (!animals.getAnimal(animal.animal)) return;
 		eventAnimals.push({ animal: animal.animal, rarity: getEventRarity(animal, event) });
 	});
-	return eventAnimals;
+	return eventAnimals.filter((animal) => animal.rarity > 0);
 }
 
 function getEventRarity(animal, event) {
@@ -231,7 +249,10 @@ exports.getPid = async function (id, pet) {
 		const member = await memberships.findOne({ pgid, pos: parseInt(pet) });
 		return member?.pid;
 	}
-	const row = await animalCollection.findOne({ id: userId, name: pet.value }, { projection: { pid: 1 } });
+	const row = await animalCollection.findOne(
+		{ id: userId, name: pet.value },
+		{ projection: { pid: 1 } }
+	);
 	return row?.pid;
 };
 
