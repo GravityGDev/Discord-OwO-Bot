@@ -119,7 +119,7 @@ async function migrateTable(db, table) {
 
 	console.log(`Migrating ${table}${primaryKey.length ? ` [PK: ${primaryKey.join(', ')}]` : ''}...`);
 
-	while (true) {
+	for (;;) {
 		let rows;
 		if (singlePrimaryKey) {
 			const column = mysql.escapeId(singlePrimaryKey);
