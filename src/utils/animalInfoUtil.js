@@ -6,7 +6,6 @@
  */
 
 let animalJson = require('../data/animal.json');
-const mysql = require('./../botHandlers/mysqlHandler.js');
 let bot;
 
 class AnimalJson {
@@ -42,10 +41,11 @@ class AnimalJson {
 
 		let result;
 		try {
-			result = await mysql.query(`SELECT * FROM animals;`);
+			const collection = await bot.mongo.collection('animals');
+			result = await collection.find({}).toArray();
 		} catch (err) {
 			console.error(err);
-			console.error('Failed to fetch animals, retrying in 10s');
+			console.error('Failed to fetch animals, retrying in 5s');
 			return new Promise((res) => {
 				setTimeout(() => {
 					res(this.initialize());
@@ -98,8 +98,10 @@ class AnimalJson {
 	}
 
 	async reinitializeAnimal(animalName) {
-		const result = await mysql.query(`SELECT * FROM animals WHERE name = ?`, animalName);
-		this.parseAnimal(result[0]);
+		const collection = await bot.mongo.collection('animals');
+		const result = await collection.findOne({ name: animalName });
+		if (!result) return;
+		this.parseAnimal(result);
 		this.updateAnimalsAndRanks();
 	}
 
