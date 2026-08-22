@@ -7,8 +7,6 @@
 
 const CommandInterface = require('../../CommandInterface.js');
 
-const battleUtil = require('./util/battleUtil.js');
-
 module.exports = new CommandInterface({
 	alias: ['battlesetting', 'bs', 'battlesettings'],
 
@@ -34,8 +32,40 @@ module.exports = new CommandInterface({
 	},
 });
 
+async function getSettings(p) {
+	const uid = await p.global.getUid(p.msg.author.id);
+	const collection = await p.mongo.collection('battle_settings');
+	const result = await collection.findOne({ uid });
+
+	const settings = {
+		auto: true,
+		display: 'image',
+		speed: 'short',
+		showLogs: false,
+	};
+
+	if (!result) return settings;
+
+	if (result.speed == 0) settings.speed = 'instant';
+	else if (result.speed == 2) settings.speed = 'lengthy';
+
+	if (result.display == 'text') settings.display = 'text';
+	else if (result.display == 'compact') settings.display = 'compact';
+
+	if (result.logs == 1) {
+		settings.showLogs = true;
+		settings.auto = true;
+		settings.speed = 'instant';
+	} else if (result.logs == 2) {
+		settings.showLogs = 'link';
+		settings.auto = true;
+	}
+
+	return settings;
+}
+
 async function display(p) {
-	let settings = await battleUtil.getBattleSetting.bind(p)();
+	const settings = await getSettings(p);
 
 	let text = '**Display = ** `' + settings.display + '`\n';
 	text += '**Speed = ** `' + settings.speed + '`';
