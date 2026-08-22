@@ -25,6 +25,26 @@ jobs:
         with:
           node-version: 15.14.0
 
+      - name: Finalize weapon MongoDB cutover
+        if: github.event_name == 'push'
+        run: python3 scripts/finalize-weapon-mongo-cutover.py
+
+      - name: Format weapon cutover files
+        if: github.event_name == 'push'
+        run: |
+          npx -p prettier@2.8.0 prettier --write \
+            src/commands/commandList/battle/WeaponInterface.js \
+            src/commands/commandList/battle/util/weaponUtil.js \
+            src/commands/commandList/patreon/alterBattle.js \
+            src/utils/weaponMongoPersistence.js \
+            src/owo.js
+          npx -p eslint@8.29.0 -p eslint-config-prettier@8.5.0 eslint --fix \
+            src/commands/commandList/battle/WeaponInterface.js \
+            src/commands/commandList/battle/util/weaponUtil.js \
+            src/commands/commandList/patreon/alterBattle.js \
+            src/utils/weaponMongoPersistence.js \
+            src/owo.js
+
       - name: Refresh package-lock.json
         run: npm install --package-lock-only --ignore-scripts
 
@@ -54,19 +74,22 @@ jobs:
           node --check scripts/migrate-redis-to-mongodb.js
           node --check scripts/audit-mongodb-cutover.js
 
+      - name: Check circular dependencies
+        run: npx -p dpdm@3.13.1 dpdm --exit-code circular:1 ./src/owo.js
+
       - name: Audit remaining SQL call sites
         run: node scripts/audit-mongodb-cutover.js
 
-      - name: Commit lockfile when changed
+      - name: Commit migration updates when changed
         if: github.event_name == 'push'
         shell: bash
         run: |
-          if git diff --quiet -- package-lock.json; then
-            echo "package-lock.json is already current"
+          if git diff --quiet; then
+            echo "Migration workspace is already current"
             exit 0
           fi
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add package-lock.json
-          git commit -m "Update package lock for MongoDB migration"
+          git add -A
+          git commit -m "Finalize weapon MongoDB cutover"
           git push origin HEAD:mongodb-migration
