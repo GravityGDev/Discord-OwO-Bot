@@ -236,20 +236,21 @@ exports.canGiveMongo = async function (
 	const numericAmount = mongoNumeric.integerString(amount);
 	const amountBig = BigInt(numericAmount);
 	const options = session ? { session } : {};
-	const [cowoncy, limits] = await Promise.all([
-		this.mongo.collection('cowoncy'),
-		this.mongo.collection('cowoncy_limit'),
-	]);
+	const cowoncy = await this.mongo.collection('cowoncy');
+	const limits = await this.mongo.collection('cowoncy_limit');
 
-	const [senderBalance, senderRow, receiverRow, senderLimits, receiverLimits] = await Promise.all([
-		skipCowoncyCheck
-			? Promise.resolve(null)
-			: cowoncy.findOne({ id: String(sender.id) }, { ...options, projection: { money: 1 } }),
-		limits.findOne({ id: String(sender.id) }, options),
-		limits.findOne({ id: String(receiver.id) }, options),
-		getUserLimits(sender.id),
-		getUserLimits(receiver.id),
-	]);
+	// MongoDB does not support parallel operations on the same transaction session.
+	let senderBalance = null;
+	if (!skipCowoncyCheck) {
+		senderBalance = await cowoncy.findOne(
+			{ id: String(sender.id) },
+			{ ...options, projection: { money: 1 } }
+		);
+	}
+	const senderRow = await limits.findOne({ id: String(sender.id) }, options);
+	const receiverRow = await limits.findOne({ id: String(receiver.id) }, options);
+	const senderLimits = await getUserLimits(sender.id);
+	const receiverLimits = await getUserLimits(receiver.id);
 
 	if (
 		!skipCowoncyCheck &&
@@ -343,10 +344,9 @@ exports.applyGiveLimitsMongo = async function (plan, { session } = {}) {
 			  }
 		: { id: plan.mongo.receiver.id, receive: plan.mongo.receiver.next };
 
-	await Promise.all([
-		limits.updateOne({ id: plan.mongo.sender.id }, { $set: senderSet }, options),
-		limits.updateOne({ id: plan.mongo.receiver.id }, { $set: receiverSet }, options),
-	]);
+	// Keep transaction operations sequential; Promise.all on one session is unsupported.
+	await limits.updateOne({ id: plan.mongo.sender.id }, { $set: senderSet }, options);
+	await limits.updateOne({ id: plan.mongo.receiver.id }, { $set: receiverSet }, options);
 };
 
 /*
