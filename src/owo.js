@@ -76,6 +76,9 @@ class OwO extends Base {
 		this.global = require('./utils/global.js');
 		this.global.init(this);
 
+		// Install MongoDB persistence for weapon save/update/tracker methods before commands load.
+		require('./utils/weaponMongoPersistence.js').install();
+
 		this.animalUtil = require('./utils/animalInfoUtil.js');
 		this.animalUtil.setBot(this);
 
