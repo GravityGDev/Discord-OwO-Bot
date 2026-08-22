@@ -47,7 +47,7 @@ module.exports = new CommandInterface({
 	bot: true,
 
 	execute: async function (p) {
-		let user = undefined;
+		let user;
 		if (p.args.length > 0) {
 			user = p.getMention(p.args[0]);
 			if (!user) {
@@ -90,54 +90,57 @@ module.exports = new CommandInterface({
 			}
 		}
 
-		// Check if id exists first
-		let sql = 'SELECT id FROM user WHERE id in (' + p.msg.author.id;
-		let len = 1;
-		if (opponentPoints && user) {
-			sql += ',' + user.id;
-			len++;
-		}
-		sql += ');';
-		let result = await p.query(sql);
-		if (result.length < len) {
-			sql = 'INSERT IGNORE INTO user (id,count) VALUES (' + p.msg.author.id + ',0)';
-			if (opponentPoints && user) sql += ',(' + user.id + ',0);';
+		await p.global.getUid(p.msg.author.id);
+		if (user) await p.global.getUid(user.id);
+		const luck = await p.mongo.collection('luck');
+		const prayHistory = await p.mongo.collection('user_pray');
+		const session = await p.mongo.startSession();
+		let authorLuck;
+		try {
+			session.startTransaction();
+			const authorId = String(p.msg.author.id);
+			await luck.updateOne(
+				{ id: authorId },
+				{ $inc: { lcount: authorPoints }, $setOnInsert: { id: authorId } },
+				{ upsert: true, session }
+			);
+			if (opponentPoints && user) {
+				const receiverId = String(user.id);
+				await luck.updateOne(
+					{ id: receiverId },
+					{ $inc: { lcount: opponentPoints }, $setOnInsert: { id: receiverId } },
+					{ upsert: true, session }
+				);
+				await prayHistory.updateOne(
+					{ sender: authorId, receiver: receiverId },
+					{
+						$inc: { count: 1 },
+						$set: { latest: new Date() },
+						$setOnInsert: { sender: authorId, receiver: receiverId },
+					},
+					{ upsert: true, session }
+				);
+			}
+			authorLuck = await luck.findOne({ id: authorId }, { projection: { lcount: 1 }, session });
+			await session.commitTransaction();
+		} catch (err) {
+			if (session.inTransaction()) await session.abortTransaction();
+			console.error(err);
+			p.errorMsg(', failed to update luck. Please try again later.', 3000);
+			return;
+		} finally {
+			await session.endSession();
 		}
 
-		sql =
-			'INSERT INTO luck (id,lcount) VALUES (' +
-			p.msg.author.id +
-			',' +
-			authorPoints +
-			') ON DUPLICATE KEY UPDATE lcount = lcount ' +
-			(authorPoints > 0 ? '+' + authorPoints : authorPoints) +
-			';';
-		sql += 'SELECT lcount FROM luck WHERE id = ' + p.msg.author.id + ';';
-		if (opponentPoints && user) {
-			sql +=
-				'INSERT INTO luck (id,lcount) VALUES (' +
-				user.id +
-				',' +
-				opponentPoints +
-				') ON DUPLICATE KEY UPDATE lcount = lcount ' +
-				(opponentPoints > 0 ? '+' + opponentPoints : opponentPoints) +
-				';';
-			sql +=
-				'INSERT IGNORE INTO user_pray (sender,receiver,count,latest) VALUES (' +
-				p.msg.author.id +
-				',' +
-				user.id +
-				',1,NOW()) ON DUPLICATE KEY UPDATE count = count + 1, latest = NOW();';
-		}
-
-		result = await p.query(sql);
 		text +=
-			'\n**<:blank:427371936482328596> |** You have **' + result[1][0].lcount + '** luck point(s)!';
+			'\n**<:blank:427371936482328596> |** You have **' +
+			(authorLuck?.lcount || 0) +
+			'** luck point(s)!';
 		const alterText = await alterPray.alter(p, text, {
 			command: p.command,
 			author: p.msg.author,
 			user,
-			luck: result[1][0].lcount,
+			luck: authorLuck?.lcount || 0,
 		});
 		p.send(alterText || text);
 		if (user && quest) p.quest(quest, 1, user);
