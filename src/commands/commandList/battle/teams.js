@@ -32,9 +32,9 @@ module.exports = new CommandInterface({
 
 	execute: async function (p) {
 		if (p.args.length < 1) {
-			displayTeams(p);
+			await displayTeams(p);
 		} else if (p.global.isInt(p.args[0])) {
-			setTeam(p, +p.args[0]);
+			await setTeam(p, +p.args[0]);
 		} else {
 			p.errorMsg(', the correct syntax is `owo setteam {teamNumber}`', 3000);
 		}
@@ -42,105 +42,30 @@ module.exports = new CommandInterface({
 });
 
 async function displayTeams(p) {
-	let maxTeams = await teamUtil.getMaxTeams.bind(p)(p.msg.author);
-	// Fetch all teams and weapons
-	let sql = `SELECT pet_team.pgid,tname,pos,name,nickname,animal.pid,xp,pet_team.streak,highest_streak
-		FROM user
-			INNER JOIN pet_team
-				ON user.uid = pet_team.uid
-			INNER JOIN pet_team_animal
-				ON pet_team.pgid = pet_team_animal.pgid 
-			INNER JOIN animal
-				ON pet_team_animal.pid = animal.pid
-		WHERE user.id = ${p.msg.author.id} AND pet_team.disabled = 0
-		ORDER BY pgid ASC, pos ASC;`;
-	sql += `SELECT DISTINCT
-			a.pid, a.uwid, a.wid, a.stat, a.rrcount, a.rrattempt, a.wear,
-			b.pcount, b.wpid, b.stat as pstat,
-			c.name, c.nickname,
-			d.uwid as tt, d.kills
-		FROM user u
-			INNER JOIN pet_team pt
-				ON u.uid = pt.uid
-			INNER JOIN pet_team_animal pta
-				ON pt.pgid = pta.pgid
-			INNER JOIN animal c
-				ON pta.pid = c.pid
-			INNER JOIN user_weapon a
-				ON pta.pid = a.pid
-			LEFT JOIN user_weapon_passive b
-				ON a.uwid = b.uwid
-			LEFT JOIN user_weapon_kills d
-				ON a.uwid = d.uwid
-		WHERE u.id = ${p.msg.author.id} AND pt.disabled = 0;`;
-	sql += `SELECT pet_team.pgid, pet_team_active.pgid AS active FROM user
-		INNER JOIN pet_team
-			ON user.uid = pet_team.uid
-		LEFT JOIN pet_team_active
-			ON pet_team.pgid = pet_team_active.pgid
-		WHERE user.id = ${p.msg.author.id} AND pet_team.disabled = 0
-		ORDER BY pgid ASC;`;
-	let result = await p.query(sql);
-
-	// group animals by pgid
-	const teamsObj = {};
-	const animalMap = {};
-	for (let i in result[0]) {
-		let animal = result[0][i];
-		let pgid = animal.pgid;
-
-		if (!animalMap[animal.pid]) animalMap[animal.pid] = [];
-		animalMap[animal.pid].push(pgid);
-		if (!teamsObj[pgid]) teamsObj[pgid] = { animals: [], weapons: [] };
-		teamsObj[pgid].animals.push(animal);
-	}
-
-	// group weapons by pgid
-	for (let i in result[1]) {
-		let weapon = result[1][i];
-		let pgids = animalMap[weapon.pid];
-		if (pgids) {
-			for (let j in pgids) {
-				let pgid = pgids[j];
-				teamsObj[pgid].weapons.push(weapon);
-			}
-		}
-	}
-
-	// Check if we even have 1 team
-	let activeTeam = 0;
-	const teamsOrder = {};
-	if (!result[2].length) {
+	const maxTeams = await teamUtil.getMaxTeams.bind(p)(p.msg.author);
+	const info = await teamUtil.getUserTeamPgids(p, p.msg.author.id);
+	if (!info.pgids.length) {
 		p.errorMsg(", you don't have a team! Create one with `owo team add {animalName}`!", 5000);
 		return;
 	}
-	// Find current active team
-	for (let i in result[2]) {
-		teamsOrder[result[2][i].pgid] = i;
-		if (result[2][i].active) activeTeam = i;
-	}
 
-	// Parse all teams and weapons
+	let activeTeam = info.pgids.indexOf(info.activePgid);
+	if (activeTeam < 0) activeTeam = 0;
 	const teams = [];
-	for (let i in teamsObj) {
-		let team = teamsObj[i];
-		const pgid = team.animals[0].pgid;
+
+	for (let i = 0; i < info.pgids.length && i < maxTeams; i++) {
+		const pgid = info.pgids[i];
+		const rows = await teamUtil.getJoinedTeamRows(p, pgid);
+		if (!rows.length) continue;
 		const other = {
-			streak: team.animals[0].streak,
-			highest_streak: team.animals[0].highest_streak,
-			tname: team.animals[0].tname || 'team',
+			streak: rows[0].streak || 0,
+			highest_streak: rows[0].highest_streak || 0,
+			tname: rows[0].tname || 'team',
 		};
-		team = teamUtil.parseTeam(team.animals, team.weapons);
-		const embed = teamUtil.createTeamEmbed(p, team, other);
-		const teamOrder = teamsOrder[pgid];
-		if (teamOrder == null) {
-			p.errorMsg(", I couldn't parse your team... something went terribly wrong!", 3000);
-			return;
-		}
-		teams[teamOrder] = embed;
+		const team = teamUtil.parseTeam(rows, rows);
+		teams[i] = teamUtil.createTeamEmbed(p, team, other);
 	}
 
-	// Construct embed array to display message
 	for (let i = 0; i < maxTeams; i++) {
 		if (!teams[i]) {
 			teams[i] = {
@@ -166,14 +91,10 @@ async function displayTeams(p) {
 		} else {
 			teams[i].footer.text += ` | Page ${i + 1}/${maxTeams}`;
 		}
-		if (activeTeam == i) {
-			teams[i].footer.text += ' ' + starEmoji;
-		}
+		if (activeTeam == i) teams[i].footer.text += ' ' + starEmoji;
 	}
 
-	const createEmbed = (curr) => {
-		return teams[curr];
-	};
+	const createEmbed = (curr) => teams[curr];
 	const additionalButtons = [
 		{
 			type: 2,
@@ -188,7 +109,7 @@ async function displayTeams(p) {
 	const additionalFilter = (componentName, user) =>
 		componentName === 'star' && user.id == p.msg.author.id;
 	const pagedMsg = new p.PagedMessage(p, createEmbed, maxTeams - 1, {
-		startingPage: activeTeam,
+		startingPage: Math.min(activeTeam, maxTeams - 1),
 		idle: 120000,
 		additionalFilter,
 		additionalButtons,
@@ -198,9 +119,7 @@ async function displayTeams(p) {
 	pagedMsg.on('button', async (component, user, ack, { currentPage, maxPage }) => {
 		if (component === 'star') {
 			await setTeam(p, currentPage + 1, true);
-			for (let i in teams) {
-				teams[i].footer.text = teams[i].footer.text.replace(` ${starEmoji}`, '');
-			}
+			for (let i in teams) teams[i].footer.text = teams[i].footer.text.replace(` ${starEmoji}`, '');
 			teams[currentPage].footer.text += ` ${starEmoji}`;
 			await ack({ embed: teams[currentPage] });
 		}
@@ -208,8 +127,7 @@ async function displayTeams(p) {
 }
 
 async function setTeam(p, teamNum, dontDisplay) {
-	let maxTeams = await teamUtil.getMaxTeams.bind(p)(p.msg.author);
-	// argument validation
+	const maxTeams = await teamUtil.getMaxTeams.bind(p)(p.msg.author);
 	if (!teamNum || teamNum < 1 || teamNum > maxTeams) {
 		p.errorMsg(', invalid team number!', 3000);
 		return;
@@ -223,29 +141,13 @@ async function setTeam(p, teamNum, dontDisplay) {
 		return;
 	}
 
-	// Fetch uid and pgid
-	let sql = `SELECT uid FROM user WHERE id = ${p.msg.author.id};
-		SELECT pgid FROM user LEFT JOIN pet_team ON user.uid = pet_team.uid WHERE id = ${
-			p.msg.author.id
-		} AND pet_team.disabled = 0 ORDER BY pgid LIMIT 1 OFFSET ${teamNum - 1}`;
-	let result = await p.query(sql);
+	const uid = await p.global.getUid(p.msg.author.id);
+	const info = await teamUtil.getUserTeamPgids(p, p.msg.author.id);
+	let pgid = info.pgids[teamNum - 1];
+	if (!pgid) pgid = await teamUtil.createEmptyTeam(p, uid);
 
-	if (!result[0]) {
-		p.errorMsg(", you don't have any animals! Get some with `owo hunt`!", 3000);
-		return;
-	}
+	const active = await p.mongo.collection('pet_team_active');
+	await active.updateOne({ uid }, { $set: { uid, pgid } }, { upsert: true });
 
-	let pgid = result[1][0];
-	let uid = result[0][0].uid;
-	// Insert it to db if it doesn't exist
-	if (!pgid) {
-		sql = `INSERT INTO pet_team (uid) VALUES (${uid});`;
-		result = await p.query(sql);
-		pgid = result.insertId;
-	} else pgid = pgid.pgid;
-
-	// insert as the current active team
-	sql = `INSERT INTO pet_team_active (uid,pgid) VALUES (${uid},${pgid}) ON DUPLICATE KEY UPDATE pgid = ${pgid};`;
-	await p.query(sql);
-	if (!dontDisplay) displayTeams(p);
+	if (!dontDisplay) await displayTeams(p);
 }
