@@ -7,6 +7,7 @@
 
 const alterBuy = require('../../patreon/alterBuy.js');
 const rings = require('../../../../data/rings.json');
+const mongoNumeric = require('../../../../utils/mongoNumeric.js');
 const cart = '🛒';
 const sold = '💰';
 
@@ -17,24 +18,40 @@ exports.buy = async function (p, id) {
 		return;
 	}
 
-	let sql = `UPDATE cowoncy SET money = money - ${ring.price} WHERE id = ${p.msg.author.id} AND money >= ${ring.price}`;
-	let result = await p.query(sql);
-
-	if (!result || result.changedRows < 1) {
-		p.errorMsg(', you do not have enough cowoncy! >:c', 3000);
-		return;
-	}
-
-	sql = `INSERT INTO user_ring (uid,rid,rcount) VALUES ((SELECT uid FROM user WHERE id = ${p.msg.author.id}),${ring.id},1) ON DUPLICATE KEY UPDATE rcount = rcount + 1;`;
+	const uid = await p.global.getUid(p.msg.author.id);
+	const session = await p.mongo.startSession();
 	try {
-		await p.query(sql);
-	} catch (e) {
-		if (e.code == 'ER_BAD_NULL_ERROR')
-			await p.query(`INSERT INTO user (id,count) VALUES (${p.msg.author.id},0); ` + sql);
-		else console.error(e);
+		session.startTransaction();
+		const balances = await p.mongo.collection('cowoncy');
+		const debit = await mongoNumeric.subtractIfEnough(
+			balances,
+			{ id: String(p.msg.author.id) },
+			'money',
+			ring.price,
+			{ session }
+		);
+		if (!debit.modifiedCount) {
+			await session.abortTransaction();
+			p.errorMsg(', you do not have enough cowoncy! >:c', 3000);
+			return;
+		}
+
+		const userRings = await p.mongo.collection('user_ring');
+		await userRings.updateOne(
+			{ uid, rid: ring.id },
+			{ $inc: { rcount: 1 }, $setOnInsert: { uid, rid: ring.id } },
+			{ upsert: true, session }
+		);
+		await session.commitTransaction();
+	} catch (err) {
+		if (session.inTransaction()) await session.abortTransaction();
+		console.error(err);
+		p.errorMsg(', failed to buy that ring. Please try again later.', 3000);
+		return;
+	} finally {
+		await session.endSession();
 	}
 
-	// TODO neo4j
 	p.logger.decr('cowoncy', -1 * ring.price, { type: 'ring' }, p.msg);
 	let an = p.global.isVowel(ring.name) ? 'n' : '';
 	let text = `${cart} **| ${p.getName()}**, you bought a${an} ${ring.emoji} **${
@@ -52,22 +69,18 @@ exports.buy = async function (p, id) {
 };
 
 exports.getItems = async function (p) {
-	let sql = `SELECT rid,rcount FROM user_ring INNER JOIN user ON user.uid = user_ring.uid WHERE id = ${p.msg.author.id} AND rcount > 0;`;
-	let result = await p.query(sql);
-	if (!result[0]) {
-		return {};
-	}
+	const uid = await p.global.getUid(p.msg.author.id);
+	const userRings = await p.mongo.collection('user_ring');
+	const result = await userRings.find({ uid, rcount: { $gt: 0 } }).toArray();
+	if (!result.length) return {};
 
 	let items = {};
-
 	for (let i in result) {
 		let id = result[i].rid;
 		let count = result[i].rcount;
 		let ring = rings[id];
-
-		items[id] = { emoji: ring.emoji, id: id, count };
+		if (ring) items[id] = { emoji: ring.emoji, id: id, count };
 	}
-
 	return items;
 };
 
@@ -78,17 +91,42 @@ exports.sell = async function (p, id) {
 		return;
 	}
 
-	let sql = `UPDATE user_ring INNER JOIN user ON user.uid = user_ring.uid SET rcount = rcount - 1 WHERE id = ${p.msg.author.id} AND rcount > 0 AND rid = ${id}`;
-	let result = await p.query(sql);
-	if (result.changedRows <= 0) {
-		p.errorMsg(', you do not have that ring! >:c', 3000);
+	const uid = await p.global.getUid(p.msg.author.id);
+	const price = Math.round(ring.price * 0.75);
+	const session = await p.mongo.startSession();
+	try {
+		session.startTransaction();
+		const userRings = await p.mongo.collection('user_ring');
+		const decrement = await userRings.updateOne(
+			{ uid, rid: ring.id, rcount: { $gt: 0 } },
+			{ $inc: { rcount: -1 } },
+			{ session }
+		);
+		if (!decrement.modifiedCount) {
+			await session.abortTransaction();
+			p.errorMsg(', you do not have that ring! >:c', 3000);
+			return;
+		}
+
+		const balances = await p.mongo.collection('cowoncy');
+		await mongoNumeric.add(
+			balances,
+			{ id: String(p.msg.author.id) },
+			'money',
+			price,
+			{ upsert: true, session },
+			{ id: String(p.msg.author.id) }
+		);
+		await session.commitTransaction();
+	} catch (err) {
+		if (session.inTransaction()) await session.abortTransaction();
+		console.error(err);
+		p.errorMsg(', failed to sell that ring. Please try again later.', 3000);
 		return;
+	} finally {
+		await session.endSession();
 	}
 
-	let price = Math.round(ring.price * 0.75);
-	sql = `UPDATE cowoncy SET money = money + ${price} WHERE id = ${p.msg.author.id};`;
-	await p.query(sql);
-	// TODO neo4j
 	p.logger.incr('cowoncy', price, { type: 'ring' }, p.msg);
 	p.replyMsg(
 		sold,
