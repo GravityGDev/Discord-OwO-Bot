@@ -8,15 +8,8 @@
 const CommandInterface = require('../../CommandInterface.js');
 const mongoNumeric = require('../../../utils/mongoNumeric.js');
 const patreon = require('../../../botHandlers/patreonHandler.js');
-var cowoncy = [
-	'184587051943985152',
-	'184587051943985152',
-	'184587051943985152',
-	'184587051943985152',
-	'184587051943985152',
-	'184587051943985152',
-	'184587051943985152',
-];
+const config = require('../../../data/config.json');
+let cowoncy = [config.owner];
 
 module.exports = new CommandInterface({
 	alias: ['getpatreons', 'distributecowoncy'],
@@ -168,5 +161,5 @@ async function distributeCowoncy(p) {
 		' users\n```json\n' +
 		JSON.stringify({ recipients: cowoncy.length, modified }, null, 2) +
 		'```';
-	p.send(text);
+	await p.send(text);
 }
