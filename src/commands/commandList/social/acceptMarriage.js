@@ -47,52 +47,88 @@ module.exports = new CommandInterface({
 	cooldown: 3000,
 
 	execute: async function (p) {
-		// Get and delete a proposal request
-		let sql = `SELECT 
-				(SELECT uid FROM user WHERE id = sender) AS sender_uid,
-				(SELECT uid FROM user WHERE id = receiver) AS receiver_uid,
-				propose.* 
-			FROM propose WHERE receiver = ${p.msg.author.id}; 
-			DELETE FROM propose WHERE receiver = ${p.msg.author.id};`;
-		let result = await p.query(sql);
+		const receiverId = String(p.msg.author.id);
+		const proposals = await p.mongo.collection('propose');
+		const proposal = await proposals.findOne({ receiver: receiverId });
+		if (!proposal) {
+			p.errorMsg(', you do not have any pending marriage proposals!', 3000);
+			return;
+		}
 
-		// If there is one...
-		if (result[0].length > 0 && result[1].affectedRows > 0) {
-			// Grab user info
-			let sender = await p.fetch.getUser(result[0][0].sender);
+		const senderUid = await p.global.getUid(proposal.sender);
+		const receiverUid = await p.global.getUid(receiverId);
+		let uid1 = senderUid;
+		let uid2 = receiverUid;
+		if (uid1 > uid2) [uid1, uid2] = [uid2, uid1];
+		const ring = rings[proposal.rid];
+		if (!ring) {
+			p.errorMsg(', it seems like that proposal has an invalid ring...');
+			return;
+		}
 
-			//Insert the users and ring into the marriage database
-			let uid1 = result[0][0]['sender_uid'];
-			let uid2 = result[0][0]['receiver_uid'];
-			if (uid1 > uid2) {
-				let temp = uid1;
-				uid1 = uid2;
-				uid2 = temp;
-			}
-			let ring = rings[result[0][0].rid];
-			sql = `INSERT INTO marriage (uid1,uid2,rid) VALUES (${uid1},${uid2},${ring.id});`;
-			result = await p.query(sql);
-			if (result.affectedRows == 0) {
-				p.errorMsg(', it seems like something went wrong...');
+		const session = await p.mongo.startSession();
+		try {
+			session.startTransaction();
+			const removed = await proposals.deleteOne(
+				{ sender: proposal.sender, receiver: receiverId, rid: proposal.rid },
+				{ session }
+			);
+			if (!removed.deletedCount) {
+				await session.abortTransaction();
+				p.errorMsg(', you do not have any pending marriage proposals!', 3000);
 				return;
 			}
 
-			// Tell the user we have acceptedthe marriage request
-			if (!sender) {
-				p.replyMsg(ring.emoji, ', congratulations!! You are now married!');
-			} else {
-				let heart = [
-					hearts[Math.trunc(Math.random() * hearts.length)],
-					hearts[Math.trunc(Math.random() * hearts.length)],
-					hearts[Math.trunc(Math.random() * hearts.length)],
-				];
-				p.replyMsg(
-					ring.emoji,
-					' and **' + sender.username + '** are now married! Congratulations!! ' + heart.join(' ')
-				);
+			const marriages = await p.mongo.collection('marriage');
+			const conflict = await marriages.findOne(
+				{
+					$or: [
+						{ uid1: { $in: [uid1, uid2] } },
+						{ uid2: { $in: [uid1, uid2] } },
+					],
+				},
+				{ session }
+			);
+			if (conflict) {
+				await session.abortTransaction();
+				p.errorMsg(', you or your friend is already married!');
+				return;
 			}
+
+			await marriages.insertOne(
+				{
+					uid1,
+					uid2,
+					rid: ring.id,
+					marriedDate: new Date(),
+					dailies: 0,
+					claimDate: null,
+				},
+				{ session }
+			);
+			await session.commitTransaction();
+		} catch (err) {
+			if (session.inTransaction()) await session.abortTransaction();
+			console.error(err);
+			p.errorMsg(', it seems like something went wrong...');
+			return;
+		} finally {
+			await session.endSession();
+		}
+
+		let sender = await p.fetch.getUser(String(proposal.sender));
+		if (!sender) {
+			p.replyMsg(ring.emoji, ', congratulations!! You are now married!');
 		} else {
-			p.errorMsg(', you do not have any pending marriage proposals!', 3000);
+			let heart = [
+				hearts[Math.trunc(Math.random() * hearts.length)],
+				hearts[Math.trunc(Math.random() * hearts.length)],
+				hearts[Math.trunc(Math.random() * hearts.length)],
+			];
+			p.replyMsg(
+				ring.emoji,
+				' and **' + sender.username + '** are now married! Congratulations!! ' + heart.join(' ')
+			);
 		}
 	},
 });
