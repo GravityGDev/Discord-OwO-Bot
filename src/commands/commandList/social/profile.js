@@ -68,9 +68,19 @@ module.exports = new CommandInterface({
 			}
 			if (!user) p.errorMsg(", I couldn't find that user!", 3000);
 			else {
-				let sql = `SELECT private FROM user INNER JOIN user_profile ON user.uid = user_profile.uid WHERE id = ${user.id};`;
-				let result = await p.query(sql);
-				if (!result[0] || !result[0].private) await profileUtil.displayProfile(p, user);
+				const users = await p.mongo.collection('user');
+				const profiles = await p.mongo.collection('user_profile');
+				const storedUser = await users.findOne(
+					{ id: String(user.id) },
+					{ projection: { uid: 1 } }
+				);
+				const profile = storedUser
+					? await profiles.findOne(
+							{ uid: storedUser.uid },
+							{ projection: { private: 1 } }
+						)
+					: null;
+				if (!profile?.private) await profileUtil.displayProfile(p, user);
 				else p.errorMsg(', **' + user.username + '** has their profile set to private');
 			}
 		} else if (p.args.length > 1 && p.args[0] == 'set') {
