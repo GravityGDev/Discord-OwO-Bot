@@ -37,7 +37,6 @@ module.exports = new CommandInterface({
 async function display(p) {
 	let settings = await battleUtil.getBattleSetting.bind(p)();
 
-	//let text = (settings.showLogs?"~~":"")+"**Auto = ** `"+settings.auto+"`"+(settings.showLogs?"~~":"")+"\n";
 	let text = '**Display = ** `' + settings.display + '`\n';
 	text += '**Speed = ** `' + settings.speed + '`';
 	text += '\n**Logs = ** `' + settings.showLogs + '`';
@@ -69,11 +68,11 @@ async function changeSettings(p) {
 	if (args[0] == 'display') {
 		field = 'display';
 		if (args[1] == 'image') {
-			setting = "'image'";
+			setting = 'image';
 		} else if (args[1] == 'text') {
-			setting = "'text'";
+			setting = 'text';
 		} else if (args[1] == 'compact') {
-			setting = "'compact'";
+			setting = 'compact';
 		} else {
 			p.errorMsg(', the display settings can only be `image`, `compact`, or `text`!');
 			return;
@@ -107,17 +106,9 @@ async function changeSettings(p) {
 		return;
 	}
 
-	let sql = `INSERT IGNORE INTO battle_settings (uid,${field}) VALUES
-		((SELECT uid FROM user WHERE id = ${p.msg.author.id}),
-		 ${setting})
-		ON DUPLICATE KEY UPDATE
-			${field} = ${setting};`;
+	const uid = await p.global.getUid(p.msg.author.id);
+	const settings = await p.mongo.collection('battle_settings');
+	await settings.updateOne({ uid }, { $set: { [field]: setting } }, { upsert: true });
 
-	let result = await p.query(sql);
-	if (result.affectedRows == 0) {
-		sql = `INSERT IGNORE INTO user (id,count) VALUES (${p.msg.author.id},0); ${sql}`;
-		result = await p.query(sql);
-	}
-
-	display(p);
+	await display(p);
 }
