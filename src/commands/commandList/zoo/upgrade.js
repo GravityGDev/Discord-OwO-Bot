@@ -12,17 +12,17 @@ const autohuntUtil = require('./autohuntutil.js');
 const essence = '<a:essence:451638978299428875>';
 const traits = {};
 const efficiency = ['efficiency', 'timer', 'cd', 'cooldown'];
-for (let i = 0; i < efficiency.length; i++) traits[efficiency[i]] = 'efficiency';
+for (const key of efficiency) traits[key] = 'efficiency';
 const cost = ['cost', 'price', 'cowoncy'];
-for (let i = 0; i < cost.length; i++) traits[cost[i]] = 'cost';
+for (const key of cost) traits[key] = 'cost';
 const duration = ['duration', 'totaltime', 'time'];
-for (let i = 0; i < duration.length; i++) traits[duration[i]] = 'duration';
+for (const key of duration) traits[key] = 'duration';
 const gain = ['gain', 'essence', 'ess'];
-for (let i = 0; i < gain.length; i++) traits[gain[i]] = 'gain';
+for (const key of gain) traits[key] = 'gain';
 const exp = ['exp', 'experience', 'pet', 'xp'];
-for (let i = 0; i < exp.length; i++) traits[exp[i]] = 'exp';
+for (const key of exp) traits[key] = 'exp';
 const radar = ['radar'];
-for (let i = 0; i < radar.length; i++) traits[radar[i]] = 'radar';
+for (const key of radar) traits[key] = 'radar';
 
 module.exports = new CommandInterface({
 	alias: ['upgrade', 'upg'],
@@ -45,42 +45,29 @@ module.exports = new CommandInterface({
 	bot: true,
 
 	execute: async function (p) {
-		let { global, msg, args } = p;
-		let count, trait, all, lvl;
+		const args = p.args;
+		let count;
+		let trait;
+		let all = false;
+		let lvl = false;
 
-		//if arg0 is an int
-		if (global.isInt(p.args[0])) {
-			if (args[1]) {
-				trait = traits[args[1].toLowerCase()];
-			}
+		if (p.global.isInt(args[0])) {
+			if (args[1]) trait = traits[args[1].toLowerCase()];
 			count = parseInt(args[0]);
-
-			//if arg1 is an int
-		} else if (global.isInt(args[1])) {
-			if (args[0]) {
-				trait = traits[args[0].toLowerCase()];
-			}
+		} else if (p.global.isInt(args[1])) {
+			if (args[0]) trait = traits[args[0].toLowerCase()];
 			count = parseInt(args[1]);
-
-			// owo upg duration all
-		} else if (args[1] && 'all' == args[1].toLowerCase()) {
-			if (args[0]) {
-				trait = traits[args[0].toLowerCase()];
-			}
+		} else if (args[1] && args[1].toLowerCase() == 'all') {
+			if (args[0]) trait = traits[args[0].toLowerCase()];
 			all = true;
-
-			// owo upg duration lvl
 		} else if (['lvl', 'level'].includes(args[1]?.toLowerCase())) {
-			if (args[0]) {
-				trait = traits[args[0].toLowerCase()];
-			}
+			if (args[0]) trait = traits[args[0].toLowerCase()];
 			lvl = true;
 		} else {
 			p.errorMsg(', Please include how many animal essence to use!', 3000);
 			return;
 		}
 
-		//Check if valid args
 		if (!trait) {
 			p.errorMsg(
 				', I could not find that autohunt trait!\n**<:blank:427371936482328596> |** You can choose from: `efficiency`, `duration`, `cost`, `gain`,`exp`, or `radar`'
@@ -92,60 +79,21 @@ module.exports = new CommandInterface({
 			return;
 		}
 
-		const con = await p.startTransaction();
-		let result;
-		let sql = `SELECT * FROM autohunt WHERE id = ${msg.author.id};`;
-
-		try {
-			if (lvl) {
-				// get current xp
-				result = await con.query(sql);
-				// determine xp needed for level
-				let stat = autohuntUtil.getLvl(result[0][trait], 0, trait);
-				if (stat.max) {
-					count = 0;
-					p.errorMsg(', this trait is already maxed out!', 3000);
-					con.rollback();
-					return;
-				} else {
-					count = stat.maxxp - stat.currentxp;
-				}
-
-				sql += `UPDATE autohunt SET essence = essence - ${count}, ${trait} = ${trait} + ${count} WHERE id = ${msg.author.id} AND essence >= ${count};`;
-			} else if (all) {
-				// dump all essence into the given trait
-				sql += `UPDATE autohunt SET ${trait} = ${trait} + essence, essence = 0 WHERE id = ${msg.author.id};`;
+		const result = await applyUpgrade(p, trait, { count, all, lvl });
+		if (result.error) {
+			if (result.reason === 'max') {
+				p.errorMsg(', this trait is already maxed out!', 3000);
+			} else if (result.reason === 'essence') {
+				p.errorMsg(', You do not have enough animal essence!', 3000);
 			} else {
-				// default logic
-				sql += `UPDATE autohunt SET essence = essence - ${count}, ${trait} = ${trait} + ${count} WHERE id = ${msg.author.id} AND essence >= ${count};`;
+				p.errorMsg(', there was an error upgrading! Please try again later.', 3000);
 			}
-
-			result = await con.query(sql);
-			await con.commit();
-		} catch (err) {
-			con.rollback();
-			console.error(err);
-			p.errorMsg(', there was an error upgrading! Please try again later.', 3000);
 			return;
 		}
 
-		if (!result[0][0] || result[1].affectedRows == 0) {
-			p.errorMsg(', You do not have enough animal essence!', 3000);
-			return;
-		}
-		if (all) {
-			count = result[0][0]['essence'];
-		}
-
-		let stat = autohuntUtil.getLvl(result[0][0][trait], count, trait);
-		/* Refund overflowing mana */
-		if (stat.max) {
-			sql = `UPDATE autohunt SET essence = essence + ${stat.currentxp}, ${trait} = ${trait} - ${stat.currentxp} WHERE id = ${msg.author.id};`;
-			await p.query(sql);
-		}
-
+		const stat = autohuntUtil.getLvl(result.previousTrait, result.used, trait);
 		let text = `**🛠 | ${p.getName()}**, You successfully upgraded \`${trait}\` with  **${p.global.toFancyNum(
-			count
+			result.used
 		)} Animal Essence** ${essence}!`;
 		text += `\n**<:blank:427371936482328596> |** \`${trait}: ${stat.stat + stat.prefix} -  Lvl ${
 			stat.lvl
@@ -159,3 +107,63 @@ module.exports = new CommandInterface({
 		p.send(text);
 	},
 });
+
+async function applyUpgrade(p, trait, request) {
+	const collection = await p.mongo.collection('autohunt');
+	const session = await p.mongo.startSession();
+	let outcome = { error: true };
+
+	try {
+		await session.withTransaction(async () => {
+			outcome = { error: true };
+			const row = await collection.findOne({ id: String(p.msg.author.id) }, { session });
+			if (!row) {
+				outcome = { error: true, reason: 'essence' };
+				return;
+			}
+
+			const previousTrait = Number(row[trait] || 0);
+			const available = Number(row.essence || 0);
+			const currentStat = autohuntUtil.getLvl(previousTrait, 0, trait);
+			if (currentStat.max) {
+				outcome = { error: true, reason: 'max' };
+				return;
+			}
+
+			let requested = request.count;
+			if (request.lvl) requested = currentStat.maxxp - currentStat.currentxp;
+			if (request.all) requested = available;
+			if (!requested || requested <= 0 || available < requested) {
+				outcome = { error: true, reason: 'essence' };
+				return;
+			}
+
+			const prospective = autohuntUtil.getLvl(previousTrait, requested, trait);
+			let used = requested;
+			if (prospective.max && prospective.currentxp > 0) {
+				used = Math.max(0, requested - prospective.currentxp);
+			}
+			if (!used) {
+				outcome = { error: true, reason: 'max' };
+				return;
+			}
+
+			const changed = await collection.updateOne(
+				{ _id: row._id, essence: { $gte: used }, [trait]: row[trait] },
+				{ $inc: { essence: -used, [trait]: used } },
+				{ session }
+			);
+			if (!changed.modifiedCount) {
+				outcome = { error: true, reason: 'essence' };
+				return;
+			}
+			outcome = { error: false, used, previousTrait };
+		});
+	} catch (err) {
+		console.error(err);
+		return { error: true, reason: 'error' };
+	} finally {
+		await session.endSession();
+	}
+	return outcome;
+}
