@@ -4,6 +4,8 @@
 	"description": "a discord bot!",
 	"main": "index.js",
 	"scripts": {
+		"start": "node index.js",
+		"start:checked": "npm run preflight:runtime && node index.js",
 		"lint": "npx eslint .",
 		"lint:fix": "npx eslint --fix .",
 		"prettier": "npx prettier --check .",
