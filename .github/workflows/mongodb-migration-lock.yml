@@ -28,10 +28,13 @@ jobs:
       - name: Syntax check MongoDB migration files
         run: |
           node --check src/utils/mongo.js
+          node --check src/utils/mongoCounters.js
           node --check src/utils/redis.js
           node --check src/utils/pubsub.js
+          node --check src/utils/cacheUtil.js
           node --check src/commands/command.js
           node --check src/commands/commandList/utils/rules.js
+          node --check src/commands/commandList/economy/cowoncy.js
           node --check scripts/migrate-mysql-to-mongodb.js
           node --check scripts/migrate-redis-to-mongodb.js
 
