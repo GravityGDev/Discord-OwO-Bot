@@ -6,9 +6,7 @@
  */
 
 const CommandInterface = require('../../CommandInterface.js');
-
-const acceptEmoji = '👍';
-const key = 'pickup';
+const mongoNumeric = require('../../../utils/mongoNumeric.js');
 
 module.exports = new CommandInterface({
 	alias: ['drop', 'pickup'],
@@ -33,126 +31,13 @@ module.exports = new CommandInterface({
 	execute: async function (p) {
 		if (p.command == 'drop') {
 			await p.errorMsg(', This command is now deprecated.', 3000);
-			// drop(p);
 		} else if (p.command == 'pickup') {
-			await pickup2(p);
-			// pickup(p);
+			await pickup(p);
 		}
 	},
 });
 
-/* eslint-disable-next-line */
-async function drop(p) {
-	let amount;
-	if (p.global.isInt(p.args[0])) amount = parseInt(p.args[0]);
-	if (!amount) {
-		p.errorMsg(', Please specify the drop amount!', 3000);
-		return;
-	}
-	if (amount <= 0) {
-		p.errorMsg(', Invalid arguments!', 3000);
-		return;
-	}
-	let sql = `SELECT money FROM cowoncy WHERE id = ${p.msg.author.id};
-		CALL CowoncyDrop(${p.msg.author.id},${p.msg.channel.id},${amount});`;
-	let result = await p.query(sql);
-	if (!result[0][0] || result[0][0].money < amount) {
-		p.errorMsg(", you don't have enough cowoncy! >:c", 3000);
-		return;
-	}
-	p.neo4j.drop(p.msg, amount);
-	p.logger.decr('cowoncy', -1 * amount, { type: 'drop' }, p.msg);
-	p.send(
-		'**💰 | ' +
-			p.getName() +
-			'** dropped **' +
-			p.global.toFancyNum(amount) +
-			'** cowoncy!\n**<:blank:427371936482328596> |** Use `owo pickup` to pick it up! ',
-		8000
-	);
-	p.quest('drop');
-}
-
-/* eslint-disable-next-line */
 async function pickup(p) {
-	let agreed = await p.redis.hget('data_' + p.msg.author.id, key);
-	if (!agreed) {
-		handleWarning(p);
-		return;
-	}
-	let amount;
-	if (p.global.isInt(p.args[0])) amount = parseInt(p.args[0]);
-	if (!amount) {
-		p.errorMsg(', Please specify the pickup amount!', 3000);
-		return;
-	}
-	if (amount <= 0) {
-		p.errorMsg(', Invalid arguments!', 3000);
-		return;
-	}
-	let sql = `SELECT amount FROM cowoncydrop WHERE channel = ${p.msg.channel.id};
-		SELECT money FROM cowoncy WHERE id = ${p.msg.author.id};
-		CALL CowoncyPickup(${p.msg.author.id},${p.msg.channel.id},${amount});`;
-	let result = await p.query(sql);
-	//Not enough money
-	if (!result[1][0] || result[1][0].money < amount) {
-		p.send('**🚫 | ' + p.getName() + '**, you can only pick up as much as you have!');
-		return;
-	} else if (result[0][0] && amount <= result[0][0].amount && amount <= result[1][0].money) {
-		p.send(
-			'**💰 | ' + p.getName() + '**, you picked up **' + amount + '** cowoncy from this channel!'
-		);
-		p.neo4j.pickup(p.msg, amount);
-		p.logger.incr('cowoncy', amount, { type: 'drop' }, p.msg);
-	} else {
-		p.send(
-			'**💰 | ' +
-				p.getName() +
-				"**, there's not enough cowoncy on the floor!\n**<:blank:427371936482328596> |** You felt nice so you dropped **" +
-				amount +
-				'** cowoncy!',
-			8000
-		);
-		p.neo4j.drop(p.msg, amount);
-		p.logger.decr('cowoncy', -1 * amount, { type: 'drop' }, p.msg);
-	}
-}
-
-async function handleWarning(p) {
-	let embed = {
-		author: {
-			name: '⚠️ Hold on there, ' + p.getName() + '!',
-			icon_url: p.msg.author.avatarURL,
-		},
-		description:
-			"If you try to pickup more than what's on the floor, you'll drop it instead!\nReact with 👍 to confirm you understand!",
-		color: p.config.embed_color,
-	};
-	let msg = await p.send({ embed });
-
-	await msg.addReaction(acceptEmoji);
-
-	let filter = (emoji, userID) => emoji.name === acceptEmoji && p.msg.author.id === userID;
-	let collector = p.reactionCollector.create(msg, filter, { time: 60000 });
-	collector.on('collect', async (_emoji) => {
-		collector.stop('done');
-		p.redis.hincrby('data_' + p.msg.author.id, key, 1);
-		embed.color = 65280;
-		embed.author.name = "✅ You're all set, " + p.getName() + '!';
-		embed.description =
-			'**' + acceptEmoji + ' |** The **pickup** command is now enabled for you! Good luck!';
-		msg.edit({ embed });
-		p.setCooldown(5);
-	});
-
-	collector.on('end', async function (reason) {
-		if (reason != 'done') {
-			embed.color = 6381923;
-			await msg.edit({ content: 'This message is now inactive', embed });
-		}
-	});
-}
-async function pickup2(p) {
 	let amount;
 	if (p.global.isInt(p.args[0])) amount = parseInt(p.args[0]);
 	if (!amount) {
@@ -164,33 +49,39 @@ async function pickup2(p) {
 		return;
 	}
 
-	const con = await p.startTransaction();
+	const drops = await p.mongo.collection('cowoncydrop');
+	const balances = await p.mongo.collection('cowoncy');
+	const session = await p.mongo.startSession();
 	try {
-		let sql = `UPDATE cowoncydrop SET amount = amount - ${amount} WHERE amount >= ${amount} AND channel = ${p.msg.channel.id};`;
-		let result = await con.query(sql);
-		if (!result.changedRows) {
-			throw { errorMsg: ", there isn't enough cowoncy on the floor!" };
+		session.startTransaction();
+		const result = await drops.updateOne(
+			{ channel: String(p.msg.channel.id), amount: { $gte: amount } },
+			{ $inc: { amount: -amount } },
+			{ session }
+		);
+		if (!result.modifiedCount) {
+			await session.abortTransaction();
+			await p.errorMsg(", there isn't enough cowoncy on the floor!", 3000);
+			return;
 		}
 
-		sql = `UPDATE cowoncy SET money = money + ${amount} WHERE id = ${p.msg.author.id};`;
-		result = await con.query(sql);
-		if (!result.changedRows) {
-			throw {
-				errorMsg: ', failed to give you the cowoncy, please try again later.',
-			};
-		}
-
-		await con.commit();
+		await mongoNumeric.add(
+			balances,
+			{ id: String(p.msg.author.id) },
+			'money',
+			amount,
+			{ upsert: true, session }
+		);
+		await session.commitTransaction();
 	} catch (err) {
-		await con.rollback();
-		if (err.errorMsg) {
-			await p.errorMsg(err.errorMsg, 3000);
-		} else {
-			console.error(err);
-			await p.errorMsg(', there was an picking up cowoncy! Please try again later.', 3000);
-		}
+		if (session.inTransaction()) await session.abortTransaction();
+		console.error(err);
+		await p.errorMsg(', there was an error picking up cowoncy! Please try again later.', 3000);
 		return;
+	} finally {
+		await session.endSession();
 	}
 
+	p.logger.incr('cowoncy', amount, { type: 'drop' }, p.msg);
 	await p.replyMsg(p.config.emoji.cowoncy, `, you picked up **${amount} cowoncy**!`);
 }
