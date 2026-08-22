@@ -37,6 +37,7 @@ jobs:
           node --check src/utils/pubsub.js
           node --check src/utils/cacheUtil.js
           node --check src/utils/ban.js
+          node --check src/botHandlers/questHandler.js
           node --check src/commands/command.js
           node --check src/commands/commandList/utils/rules.js
           node --check src/commands/commandList/utils/disable.js
