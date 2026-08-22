@@ -19,11 +19,6 @@ const patterns = [
 	{ name: 'SQL DELETE', regex: /\bDELETE\s+FROM\s+[`\w]+/gi },
 ];
 
-const ignoredFiles = new Set([
-	path.normalize('src/utils/mysql.js'),
-	path.normalize('src/botHandlers/mysqlHandler.js'),
-]);
-
 function walk(dir) {
 	const result = [];
 	for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
@@ -41,8 +36,6 @@ function lineNumber(content, index) {
 const findings = [];
 for (const file of walk(src)) {
 	const relative = path.normalize(path.relative(root, file));
-	if (ignoredFiles.has(relative)) continue;
-
 	const content = fs.readFileSync(file, 'utf8');
 	for (const pattern of patterns) {
 		pattern.regex.lastIndex = 0;
