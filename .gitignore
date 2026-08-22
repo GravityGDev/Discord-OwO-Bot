@@ -21,4 +21,6 @@ node_modules/
 # log files
 .log
 
+# Runtime environment files
 .env
+secret/env
