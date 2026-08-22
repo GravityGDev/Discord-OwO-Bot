@@ -54,9 +54,6 @@ module.exports = new CommandInterface({
 	},
 });
 
-/**
- * Send the emssage to channel
- */
 async function sendZooMessage(header, text, footer, paged, alterInfo) {
 	if (paged) {
 		let pages = toPages(text);
@@ -68,46 +65,53 @@ async function sendZooMessage(header, text, footer, paged, alterInfo) {
 	}
 }
 
-/**
- * Fetches zoo from db
- */
 async function fetchZoo() {
-	let sql = `SELECT totalcount, count, animal.name, rank FROM animal INNER JOIN animals ON animal.name = animals.name WHERE id = ${this.msg.author.id};`;
-	sql += `SELECT * FROM animal_count WHERE id = ${this.msg.author.id};`;
-	const result = await this.query(sql);
+	const id = String(this.msg.author.id);
+	const animalCollection = await this.mongo.collection('animal');
+	const countCollection = await this.mongo.collection('animal_count');
+	const rows = await animalCollection
+		.find({ id }, { projection: { totalcount: 1, count: 1, name: 1 } })
+		.toArray();
+	const userAnimals = rows
+		.map((row) => {
+			const info = animals.getAnimal(row.name);
+			if (!info) return null;
+			return {
+				totalcount: Number(row.totalcount || 0),
+				count: Number(row.count || 0),
+				name: row.name,
+				rank: info.rank,
+			};
+		})
+		.filter(Boolean);
 
 	if (this.flags.display || ['display', 'd'].includes(this.args[0]?.toLowerCase())) {
-		result[0].forEach((animal) => {
+		userAnimals.forEach((animal) => {
 			animal.count = animal.totalcount;
 		});
 	}
 
 	let biggest = 0;
-	for (let i in result[0]) {
-		if (result[0][i].count > biggest) biggest = result[0][i].count;
+	for (const animal of userAnimals) {
+		if (animal.count > biggest) biggest = animal.count;
 	}
 
-	return {
-		userAnimals: result[0],
-		animalCount: result[1][0],
-		biggest: biggest,
-	};
+	const storedCounts = (await countCollection.findOne({ id })) || {};
+	const animalCount = { id };
+	for (const rank of Object.keys(animals.getRanks())) {
+		animalCount[rank] = Number(storedCounts[rank] || 0);
+	}
+
+	return { userAnimals, animalCount, biggest };
 }
 
-/**
- * Creates body text for zoo
- */
 function createBody(userAnimals, biggest) {
 	const digits = Math.trunc(Math.log10(biggest || 1) + 1);
-
 	let body = '';
-
 	const animalGrouping = {};
 	userAnimals.forEach((userAnimal) => {
 		const animalRank = userAnimal.rank;
-		if (!animalGrouping[animalRank]) {
-			animalGrouping[animalRank] = [];
-		}
+		if (!animalGrouping[animalRank]) animalGrouping[animalRank] = [];
 		animalGrouping[animalRank].push(userAnimal);
 	});
 
@@ -115,9 +119,7 @@ function createBody(userAnimals, biggest) {
 	animals.getOrder().forEach((rank) => {
 		const rankAnimals = animalGrouping[rank];
 		let text = getRankRow.bind(this)(rank, rankAnimals, digits, preBuiltDisplay);
-		if (text) {
-			body += '\n' + text;
-		}
+		if (text) body += '\n' + text;
 	});
 	body = body.replace(
 		/~:[a-zA-Z_0-9]+:/g,
@@ -126,9 +128,6 @@ function createBody(userAnimals, biggest) {
 	return body.trim();
 }
 
-/**
- * Creates row text for a single rank
- */
 function getRankRow(rank, rankAnimals, digits, preBuiltDisplay) {
 	let text = '';
 	if (preBuiltDisplay[rank]) {
@@ -140,31 +139,24 @@ function getRankRow(rank, rankAnimals, digits, preBuiltDisplay) {
 			);
 		});
 	} else {
-		if (!rankAnimals) {
-			return;
-		}
+		if (!rankAnimals) return;
 		text += `${animals.getRank(rank).emoji}    `;
 		for (let i = 0; i < rankAnimals.length; i++) {
 			const animal = rankAnimals[i];
-			if (i && i % 5 === 0) {
-				text += '\n<:blank:427371936482328596>    ';
-			}
+			if (i && i % 5 === 0) text += '\n<:blank:427371936482328596>    ';
 			text += animal.name + this.global.toSmallNum(animal.count, digits) + '  ';
 		}
 	}
 	return text;
 }
 
-/**
- * Creates footer text for zoo
- */
 function createFooter(count, paged) {
 	let footer = '';
-
 	let total = 0;
 	for (let rank in count) {
 		if (!['id', 'total'].includes(rank)) {
-			total += count[rank] * animals.getRank(rank).points;
+			const info = animals.getRank(rank);
+			if (info) total += Number(count[rank] || 0) * info.points;
 		}
 	}
 
@@ -177,11 +169,7 @@ function createFooter(count, paged) {
 		footer += `${scoreText}**`;
 	}
 
-	return {
-		footer,
-		score: this.global.toFancyNum(total),
-		scoreText,
-	};
+	return { footer, score: this.global.toFancyNum(total), scoreText };
 }
 
 function getPreBuiltDisplay() {
@@ -189,9 +177,7 @@ function getPreBuiltDisplay() {
 	const ranks = animals.getRanks();
 	Object.values(ranks).forEach((rank) => {
 		const placeholder = rank.placeholder;
-		if (!placeholder) {
-			return;
-		}
+		if (!placeholder) return;
 		result[rank.id] = `${rank.emoji}   `;
 		rank.placeholder.forEach((animal) => {
 			result[rank.id] += `~${animal}  `;
@@ -219,9 +205,7 @@ function toPages(text) {
 
 async function sendPages(p, pages, header, footer, alterInfo) {
 	const formattedPages = await formatPages(p, header, pages, footer, alterInfo);
-	const createEmbed = (curr, _max) => {
-		return formattedPages[curr];
-	};
+	const createEmbed = (curr, _max) => formattedPages[curr];
 	new p.PagedMessage(p, createEmbed, formattedPages.length - 1, { idle: 120000 });
 }
 
@@ -240,11 +224,9 @@ async function toEmbed(p, header, pages, footer, loc, alterInfo) {
 		...alterInfo,
 		animals: pages[loc].trim(),
 	});
-	if (alterEmbed) {
-		return alterEmbed;
-	}
+	if (alterEmbed) return alterEmbed;
 
-	let embed = {
+	return {
 		description: pages[loc].trim(),
 		color: p.config.embed_color,
 		author: {
@@ -255,5 +237,4 @@ async function toEmbed(p, header, pages, footer, loc, alterInfo) {
 			text: `${footer}\n\nPage ${parseInt(loc) + 1}/${pages.length}`,
 		},
 	};
-	return embed;
 }
