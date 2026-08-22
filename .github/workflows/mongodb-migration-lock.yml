@@ -98,8 +98,8 @@ jobs:
         with:
           node-version: 15.14.0
 
-      - name: Install runtime dependencies without native build scripts
-        run: npm install --ignore-scripts --no-audit --no-fund
+      - name: Install isolated MongoDB driver dependencies
+        run: npm install --prefix /tmp/owo-mongo-deps --ignore-scripts --no-audit --no-fund mongodb@5.9.2
 
       - name: Start MongoDB replica set
         shell: bash
@@ -136,6 +136,7 @@ jobs:
 
       - name: Exercise runtime MongoDB transactions and exact arithmetic
         env:
+          NODE_PATH: /tmp/owo-mongo-deps/node_modules
           MONGODB_URI: mongodb://127.0.0.1:27017/owo_smoke?replicaSet=rs0
           MONGODB_DB: owo_smoke
           MONGODB_SERVER_SELECTION_TIMEOUT: 10000
