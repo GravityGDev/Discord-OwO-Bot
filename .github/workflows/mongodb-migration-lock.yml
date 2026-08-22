@@ -36,12 +36,6 @@ jobs:
             src/commands/commandList/patreon/alterBattle.js \
             src/utils/weaponMongoPersistence.js \
             src/owo.js
-          npx -p eslint@8.29.0 -p eslint-config-prettier@8.5.0 eslint --fix \
-            src/commands/commandList/battle/WeaponInterface.js \
-            src/commands/commandList/battle/util/weaponUtil.js \
-            src/commands/commandList/patreon/alterBattle.js \
-            src/utils/weaponMongoPersistence.js \
-            src/owo.js
 
       - name: Refresh package-lock.json
         run: npm install --package-lock-only --ignore-scripts
