@@ -62,8 +62,13 @@ module.exports = new CommandInterface({
 				await msg.edit(page);
 			} else if (emoji.name == buyEmoji) {
 				if (page.embed.bid) {
-					let sql = `INSERT INTO user_profile (uid,bid) VALUES ((SELECT uid FROM user WHERE id = ${p.msg.author.id}),${page.embed.bid}) ON DUPLICATE KEY UPDATE bid = ${page.embed.bid};`;
-					await p.query(sql);
+					const uid = await p.global.getUid(p.msg.author.id);
+					const profiles = await p.mongo.collection('user_profile');
+					await profiles.updateOne(
+						{ uid },
+						{ $set: { bid: page.embed.bid }, $setOnInsert: { uid } },
+						{ upsert: true }
+					);
 					page = await createPage(p, currentPage, totalPages);
 					await msg.edit(page);
 				}
@@ -82,10 +87,18 @@ module.exports = new CommandInterface({
 });
 
 async function createPage(p, page, totalPages) {
-	let sql = `SELECT b.*,up.uid AS profile FROM user u INNER JOIN user_backgrounds ub ON u.uid = ub.uid INNER JOIN backgrounds b ON ub.bid = b.bid LEFT JOIN user_profile up ON u.uid = up.uid AND up.bid = ub.bid WHERE id = ${
-		p.msg.author.id
-	} ORDER BY ub.bid LIMIT 1 OFFSET ${page - 1}`;
-	let result = await p.query(sql);
+	const uid = await p.global.getUid(p.msg.author.id);
+	const inventory = await p.mongo.collection('user_backgrounds');
+	const backgrounds = await p.mongo.collection('backgrounds');
+	const profiles = await p.mongo.collection('user_profile');
+	const ownership = await inventory
+		.find({ uid })
+		.sort({ bid: 1 })
+		.skip(Math.max(0, page - 1))
+		.limit(1)
+		.next();
+	const background = ownership ? await backgrounds.findOne({ bid: ownership.bid }) : null;
+	const profile = await profiles.findOne({ uid }, { projection: { bid: 1 } });
 
 	let embed = {
 		author: {
@@ -98,13 +111,13 @@ async function createPage(p, page, totalPages) {
 		},
 	};
 
-	if (result[0]) {
-		embed.description = '`' + (offsetID + result[0].bid) + '` **' + result[0].bname + '**';
+	if (background) {
+		embed.description = '`' + (offsetID + background.bid) + '` **' + background.bname + '**';
 		embed.image = {
-			url: `${process.env.GEN_HOST}/background/${result[0].bid}.png`,
+			url: `${process.env.GEN_HOST}/background/${background.bid}.png`,
 		};
-		if (result[0].profile) embed.description += '   *Currently Equipped*';
-		embed.bid = result[0].bid;
+		if (profile?.bid === background.bid) embed.description += '   *Currently Equipped*';
+		embed.bid = background.bid;
 	} else {
 		embed.description = "You don't have any wallpapers! :c Purchase one in `owo shop`!";
 		delete embed.footer;
@@ -114,7 +127,7 @@ async function createPage(p, page, totalPages) {
 }
 
 async function getTotalPages(p) {
-	let sql = `SELECT COUNT(bid) AS count FROM user u INNER JOIN user_backgrounds ub ON u.uid = ub.uid WHERE id = ${p.msg.author.id};`;
-	let result = await p.query(sql);
-	return result[0].count;
+	const uid = await p.global.getUid(p.msg.author.id);
+	const inventory = await p.mongo.collection('user_backgrounds');
+	return inventory.countDocuments({ uid });
 }
