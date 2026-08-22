@@ -9,8 +9,17 @@ const CommandInterface = require('../../CommandInterface.js');
 
 const request = require('request');
 let cases = {};
-fetchCases();
-setInterval(fetchCases, 1800000);
+let fetchTimer = null;
+const sharderHost = String(process.env.SHARDER_HOST || '').replace(/\/$/, '');
+const covidEnabled = Boolean(sharderHost);
+
+if (covidEnabled) {
+	fetchCases();
+	fetchTimer = setInterval(fetchCases, 1800000);
+	fetchTimer.unref?.();
+} else {
+	console.log('[COVID] Disabled; SHARDER_HOST is not configured');
+}
 
 module.exports = new CommandInterface({
 	alias: ['covid', 'cv', 'covid19', 'coronavirus'],
@@ -30,6 +39,10 @@ module.exports = new CommandInterface({
 	cooldown: 5000,
 
 	execute: async function (p) {
+		if (!covidEnabled) {
+			p.errorMsg(', COVID statistics are currently unavailable on this deployment.', 3000);
+			return;
+		}
 		if (!p.args.length) {
 			showStats(p, 'global');
 		} else {
@@ -161,17 +174,27 @@ function showStats(p, name) {
 }
 
 async function fetchCases() {
+	if (!covidEnabled) return;
 	request(
 		{
 			method: 'GET',
-			uri: process.env.SHARDER_HOST + '/covid',
+			uri: `${sharderHost}/covid`,
+			timeout: 10000,
 		},
 		(error, res, body) => {
 			if (error) {
-				console.error(error);
+				console.error('[COVID] Failed to refresh statistics:', error.message || error);
 				return;
 			}
-			cases = JSON.parse(body);
+			if (!res || res.statusCode < 200 || res.statusCode >= 300) {
+				console.error(`[COVID] Statistics service returned HTTP ${res?.statusCode || 'unknown'}`);
+				return;
+			}
+			try {
+				cases = JSON.parse(body);
+			} catch (err) {
+				console.error('[COVID] Statistics service returned invalid JSON:', err.message);
+			}
 		}
 	);
 }
