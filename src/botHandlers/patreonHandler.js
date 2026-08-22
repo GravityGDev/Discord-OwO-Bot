@@ -5,10 +5,10 @@
  * For more information, see README.md and LICENSE
  */
 const axios = require('axios');
-const { Campaign } = require('patreon-discord');
 const members = {};
 const cache = {};
-let campaign;
+
+const patreonUserAgent = 'OwO Bot - Patreon Rewards';
 
 exports.request = async function (cookie) {
 	console.log('getting cowoncy...');
@@ -64,17 +64,23 @@ async function getUsers(cookie, url, list) {
 		url = url.replace('patreon.com', 'patreon.com/api');
 	}
 	try {
-		const { data } = await axios.get(url, { headers: { cookie } });
+		const { data } = await axios.get(url, {
+			headers: {
+				cookie,
+				'User-Agent': patreonUserAgent,
+			},
+		});
 		data.included?.forEach((item) => {
 			if (item.type === 'user') {
 				const discord = item.attributes?.social_connections?.discord;
 				list.push({
 					name: item.attributes?.full_name,
-					discord: discord?.user_id,
+					discord: getDiscordConnectionId(discord),
 					user_id: item.id,
 				});
 			} else if (item.type === 'member') {
-				members[item.relationships.user.data.id] = item.id;
+				const userId = item.relationships?.user?.data?.id;
+				if (userId) members[userId] = item.id;
 			}
 		});
 		for (let i in list) {
@@ -84,7 +90,7 @@ async function getUsers(cookie, url, list) {
 		}
 
 		console.log('list length: ' + list.length);
-		if (data.links.next) {
+		if (data.links?.next) {
 			console.log('getting next page...');
 			return getUsers(cookie, data.links.next, list);
 		}
@@ -95,134 +101,45 @@ async function getUsers(cookie, url, list) {
 	}
 }
 
+function getDiscordConnectionId(discord) {
+	if (!discord) return null;
+	if (typeof discord === 'string') return discord;
+	return discord.user_id || discord.id || null;
+}
+
 async function getDiscordId(userId) {
-	if (!campaign) {
-		campaign = new Campaign({
-			patreonToken: process.env.PATREON_ACCESS_TOKEN,
-			campaignId: 1623609,
-		});
-	}
 	const memberId = members[userId];
+	if (!memberId) return null;
+	if (cache[memberId] !== undefined) return cache[memberId];
 
-	if (cache[memberId]) {
+	const token = process.env.PATREON_ACCESS_TOKEN;
+	if (!token) {
+		cache[memberId] = null;
+		return null;
+	}
+
+	try {
+		const { data } = await axios.get(
+			`https://www.patreon.com/api/oauth2/v2/members/${encodeURIComponent(memberId)}`,
+			{
+				params: {
+					include: 'user',
+					'fields[user]': 'social_connections',
+				},
+				headers: {
+					Authorization: `Bearer ${token}`,
+					'User-Agent': patreonUserAgent,
+				},
+			}
+		);
+		const user = data.included?.find((item) => item.type === 'user');
+		const discordId = getDiscordConnectionId(user?.attributes?.social_connections?.discord);
+		cache[memberId] = discordId || null;
 		return cache[memberId];
+	} catch (err) {
+		console.error(`Failed to resolve Patreon member ${memberId} through API v2`);
+		console.error(err.response?.data || err.message || err);
+		cache[memberId] = null;
+		return null;
 	}
-
-	const patron = await campaign.fetchPatron(memberId);
-	const discordId = patron.discord_user_id;
-	cache[memberId] = discordId;
-	return discordId;
 }
-
-/*
-var url = require('url');
-var patreon = require('patreon');
-
-var patreonAPI,patreonOAuth,patreonOAuthClient,patreon_client;
-//var link = '/campaigns/1623609?include=benefits.deliverables.user&fields%5Bbenefit%5D=title&fields%5Buser%5D=full_name,social_connections';
-const benefitLink = '/campaigns/1623609?include=benefits.deliverables&fields%5Bbenefit%5D=title';
-const userLink = ''
-
-
-exports.request = async function(){
-	patreonAPI = patreon.patreon;
-	patreonOAuth = patreon.oauth;
-	patreonOAuthClient = patreonOAuth(process.env.PATREON_CLIENT_ID, process.env.PATREON_CLIENT_SECRET);
-	patreon_client = patreonAPI(process.env.PATREON_ACCESS_TOKEN);
-	return await requestRec();
-}
-
-async function requestRec () {
-	console.log('requesting...');
-	let result = await patreon_client(benefitLink)
-	console.log('request done');
-	let res = {};
-	console.log(result);
-
-	// Grab benefits
-	let benefits = {};
-	for(let i in result.rawJson.included){
-		let obj = result.rawJson.included[i];
-		if(obj.type=='benefit'){
-			benefits[obj.id] = {title:obj.attributes.title,users:[],deliverable:[]}
-			for(let j in obj.relationships.deliverables.data){
-				let deliverable = obj.relationships.deliverables.data[j];
-				benefits[obj.id].deliverable.push(deliverable.id);
-			}
-			res[obj.attributes.title] = [];
-		}
-	}
-	console.log(JSON.stringify(benefits, null, 2));
-
-	// Grab deliverables
-	for(let i in result.rawJson.included){
-		let obj = result.rawJson.included[i];
-		if(obj.type=='deliverable'&&obj.attributes.delivery_status=='not_delivered'){
-			for(let j in benefits){
-				if(benefits[j].deliverable.includes(obj.id)){
-					benefits[j].users.push(obj.relationships.user.data.id);
-				}
-			}
-		}
-	}
-
-	console.log(JSON.stringify(benefits, null, 2));
-}
-
-async function requestRec(url){
-	console.log('requesting...');
-	let result = await patreon_client(url)
-	console.log('request done');
-	let res = {};
-
-	// Grab benefits
-	let benefits = {};
-	for(let i in result.rawJson.included){
-		let obj = result.rawJson.included[i];
-		if(obj.type=='benefit'){
-			benefits[obj.id] = {title:obj.attributes.title,users:[],deliverable:[]}
-			for(let j in obj.relationships.deliverables.data){
-				let deliverable = obj.relationships.deliverables.data[j];
-				benefits[obj.id].deliverable.push(deliverable.id);
-			}
-			res[obj.attributes.title] = [];
-		}
-	}
-
-	// Grab deliverables
-	for(let i in result.rawJson.included){
-		let obj = result.rawJson.included[i];
-		if(obj.type=='deliverable'&&obj.attributes.delivery_status=='not_delivered'){
-			for(let j in benefits){
-				if(benefits[j].deliverable.includes(obj.id)){
-					benefits[j].users.push(obj.relationships.user.data.id);
-				}
-			}
-		}
-	}
-
-	//Grab users
-	const users = {};
-	for(let i in result.rawJson.included){
-		let obj = result.rawJson.included[i];
-		if(obj.type=='user'){
-			users[obj.id] = obj;
-			
-		}
-	}
-
-	for (let i in benefits){
-		for (let j in benefits[i].users) {
-			const user = users[benefits[i].users[j]];
-			if (user) {
-				res[benefits[i].title].push({
-					name: user.attributes.full_name,
-					discordID:(user.attributes.social_connections?.discord ? user.attributes.social_connections.discord.user_id : null)
-				});
-			}
-		}
-	}
-
-	return res;
-}
-*/
