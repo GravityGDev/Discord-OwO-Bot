@@ -8,6 +8,8 @@ const axios = require('axios');
 const requireDir = require('require-dir');
 const dir = requireDir('./');
 
+const DISCORD_API = 'https://discord.com/api/v10';
+
 class InteractionHandler {
 	constructor(main) {
 		this.listeners = {};
@@ -21,7 +23,7 @@ class InteractionHandler {
 
 	emit(name, data) {
 		if (this.listeners[name]) {
-			const url = `https://discord.com/api/v8/interactions/${data.id}/${data.token}/callback`;
+			const url = `${DISCORD_API}/interactions/${data.id}/${data.token}/callback`;
 			const ack = (content) => {
 				if (content) {
 					if (typeof content === 'string') {
@@ -36,9 +38,8 @@ class InteractionHandler {
 						type: 7,
 						data: newContent,
 					});
-				} else {
-					return axios.post(url, { type: 1 });
 				}
+				return axios.post(url, { type: 6 });
 			};
 			const err = (content) => {
 				if (typeof content === 'string') {
