@@ -5,11 +5,11 @@
  * For more information, see README.md and LICENSE
  */
 
-const mysql = require('../../../botHandlers/mysqlHandler.js');
 const global = require('../../../utils/global.js');
 const animals = require('../../../utils/animalInfoUtil.js');
 const eventUtil = require('../../../utils/eventUtil.js');
 const cacheUtil = require('../../../utils/cacheUtil.js');
+const mongo = require('../../../utils/mongo.js');
 
 let enableDistortedTier = true;
 setTimeout(() => {
@@ -75,10 +75,10 @@ function getRarities(opts) {
 	if (opts.patreon) {
 		const patreon = animals.getRank('patreon');
 		rarity[patreon.id] = patreon.rarity;
-		rarity['common'] -= patreon.rarity;
+		rarity.common -= patreon.rarity;
 		const cpatreon = animals.getRank('cpatreon');
 		rarity[cpatreon.id] = cpatreon.rarity;
-		rarity['common'] -= cpatreon.rarity;
+		rarity.common -= cpatreon.rarity;
 	}
 
 	if (opts.gem) {
@@ -88,19 +88,19 @@ function getRarities(opts) {
 			gemRarity *= opts.lucky.amount;
 		}
 		rarity[gem.id] = gemRarity;
-		rarity['common'] -= gemRarity;
+		rarity.common -= gemRarity;
 	}
 
 	if (enableDistortedTier && opts.manual) {
 		const distorted = animals.getRank('distorted');
 		rarity[distorted.id] = distorted.rarity;
-		rarity['common'] -= distorted.rarity;
+		rarity.common -= distorted.rarity;
 	}
 
 	if (opts.huntbot) {
 		const bot = animals.getRank('bot');
 		rarity[bot.id] = opts.huntbot;
-		rarity['common'] -= opts.huntbot;
+		rarity.common -= opts.huntbot;
 	}
 
 	if (opts.event) {
@@ -113,7 +113,7 @@ function getRarities(opts) {
 		}
 		const special = animals.getRank('special');
 		rarity[special.id] = specialRarity;
-		rarity['common'] -= specialRarity;
+		rarity.common -= specialRarity;
 	}
 
 	return rarity;
@@ -152,12 +152,12 @@ function getEventRarity(animal, event) {
 	return rate;
 }
 
-exports.getMultipleAnimals = async function (count, user, opt) {
+function generateMultipleAnimals(count, opt) {
 	const total = {};
 	let xp = 0;
 	for (let i = 0; i < count; i++) {
-		let animal = randAnimal(opt);
-		let rank = animals.getRank(animal.rank);
+		const animal = randAnimal(opt);
+		const rank = animals.getRank(animal.rank);
 		xp += rank.xp;
 		if (total[animal.value]) {
 			total[animal.value].count++;
@@ -176,15 +176,55 @@ exports.getMultipleAnimals = async function (count, user, opt) {
 	}
 
 	const ordered = sortAnimals(total);
-	const { sql, typeCount } = await createSql(ordered, user);
+	const typeCount = buildTypeCount(ordered);
+	return { animals: total, ordered, xp, typeCount };
+}
 
-	return {
-		animals: total,
-		ordered: ordered,
-		animalSql: sql,
-		xp: xp,
-		typeCount,
-	};
+exports.getMultipleAnimals = async function (count, user, opt) {
+	const generated = generateMultipleAnimals(count, opt);
+	const { sql } = await createSql(generated.ordered, user, generated.typeCount);
+	return { ...generated, animalSql: sql };
+};
+
+exports.getMultipleAnimalsMongo = async function (count, user, opt) {
+	const generated = generateMultipleAnimals(count, opt);
+	await ensureAnimalBatch(user.id, generated.ordered);
+	return generated;
+};
+
+exports.ensureAnimalBatch = ensureAnimalBatch;
+async function ensureAnimalBatch(id, ordered) {
+	for (const animal of ordered) {
+		await cacheUtil.insertAnimal(String(id), animal.value);
+	}
+}
+
+exports.applyAnimalBatch = async function (id, ordered, typeCount, { session } = {}) {
+	id = String(id);
+	const animalCollection = await mongo.collection('animal');
+	const countCollection = await mongo.collection('animal_count');
+	const options = session ? { session } : {};
+
+	for (const animal of ordered) {
+		const result = await animalCollection.updateOne(
+			{ id, name: animal.value },
+			{ $inc: { count: animal.count, totalcount: animal.count } },
+			options
+		);
+		if (!result.matchedCount) {
+			throw new Error(`Animal document missing after ensure: ${id}/${animal.value}`);
+		}
+	}
+
+	const increments = {};
+	for (const row of typeCount) increments[row.rank] = row.count;
+	if (Object.keys(increments).length) {
+		await countCollection.updateOne(
+			{ id },
+			{ $inc: increments, $setOnInsert: { id } },
+			{ upsert: true, ...options }
+		);
+	}
 };
 
 exports.zooScore = function (zoo) {
@@ -212,90 +252,71 @@ exports.hasSpecials = function () {
 };
 
 exports.getPid = async function (id, pet) {
-	const uid = await global.getUid(id);
-	let sql;
+	const userId = String(id);
+	const uid = await global.getUid(userId);
+	const animalCollection = await mongo.collection('animal');
+
 	if (global.isInt(pet) && parseInt(pet) < 10) {
-		sql = `SELECT pt_ani.pid FROM pet_team pt
-					LEFT JOIN pet_team_animal pt_ani
-						ON pt.pgid = pt_ani.pgid
-					LEFT JOIN pet_team_active pt_act
-						ON pt.pgid = pt_act.pgid
-				WHERE pt.uid = ${uid} AND pos = ${pet}
-				ORDER BY pt_act.pgid DESC, pt.pgid ASC LIMIT 1;`;
-	} else {
-		sql = `SELECT pid FROM animal WHERE name = '${pet.value}' AND id = ${id}`;
+		const teams = await mongo.collection('pet_team');
+		const active = await mongo.collection('pet_team_active');
+		const memberships = await mongo.collection('pet_team_animal');
+		const teamRows = await teams.find({ uid }).sort({ pgid: 1 }).toArray();
+		if (!teamRows.length) return undefined;
+		const activeRow = await active.findOne({ uid }, { projection: { pgid: 1 } });
+		let pgid = activeRow?.pgid;
+		if (!pgid || !teamRows.some((row) => row.pgid === pgid)) pgid = teamRows[0].pgid;
+		const member = await memberships.findOne({ pgid, pos: parseInt(pet) });
+		return member?.pid;
 	}
-	const result = await mysql.query(sql);
-	return result[0]?.pid;
+
+	const row = await animalCollection.findOne(
+		{ id: userId, name: pet.value },
+		{ projection: { pid: 1 } }
+	);
+	return row?.pid;
 };
 
-/**
- * Sorts an array of animals by rank then alphabetical order
- */
-function sortAnimals(animals) {
+function sortAnimals(animalMap) {
 	const animalList = [];
-	for (let value in animals) {
-		animalList.push(animals[value]);
-	}
+	for (let value in animalMap) animalList.push(animalMap[value]);
 	animalList.sort((a, b) => {
-		if (a.rankSort < b.rankSort) {
-			return -1;
-		} else if (a.rankSort > b.rankSort) {
-			return 1;
-		} else if (a.value < b.value) {
-			return -1;
-		} else if (a.value > b.value) {
-			return 1;
-		} else {
-			return 0;
-		}
+		if (a.rankSort < b.rankSort) return -1;
+		if (a.rankSort > b.rankSort) return 1;
+		if (a.value < b.value) return -1;
+		if (a.value > b.value) return 1;
+		return 0;
 	});
 	return animalList;
 }
 
-async function createSql(orderedAnimal, user) {
-	let animalSql = [];
-	let animalCountSql = {};
+function buildTypeCount(ordered) {
+	const byRank = {};
+	for (const animal of ordered) {
+		if (!byRank[animal.rank]) byRank[animal.rank] = { rank: animal.rank, count: 0 };
+		byRank[animal.rank].count += animal.count;
+	}
+	return Object.values(byRank);
+}
 
+async function createSql(orderedAnimal, user, typeCount) {
+	const animalSql = [];
 	let animalCase = '( CASE\n';
-	let animals = [];
+	const animalNames = [];
 	orderedAnimal.forEach((animal) => {
 		animalSql.push(`(${user.id}, '${animal.value}', ${animal.count}, ${animal.count})`);
-		animals.push(`'${animal.value}'`);
+		animalNames.push(`'${animal.value}'`);
 		animalCase += `WHEN name = '${animal.value}' THEN ${animal.count}\n`;
-		if (!animalCountSql[animal.rank])
-			animalCountSql[animal.rank] = {
-				rank: animal.rank,
-				count: 0,
-			};
-		animalCountSql[animal.rank].count += animal.count;
 	});
-	animalCountSql = Object.values(animalCountSql);
 	animalCase += 'ELSE 0 END)';
 
 	let sql = `UPDATE animal SET 
 			count = count + ${animalCase}, totalcount = totalcount + ${animalCase}
-			WHERE id = ${user.id} AND name in (${animals.join(',')});`;
-	sql += `INSERT INTO animal_count (id, ${animalCountSql
-		.map((animalCount) => animalCount.rank)
-		.join(',')})
-			VALUES (${user.id}, ${animalCountSql.map((animalCount) => animalCount.count).join(',')})
+			WHERE id = ${user.id} AND name in (${animalNames.join(',')});`;
+	sql += `INSERT INTO animal_count (id, ${typeCount.map((row) => row.rank).join(',')})
+			VALUES (${user.id}, ${typeCount.map((row) => row.count).join(',')})
 			ON DUPLICATE KEY UPDATE
-				${animalCountSql
-					.map((animalCount) => {
-						return `${animalCount.rank} = ${animalCount.rank} + ${animalCount.count}`;
-					})
-					.join(',')};
+				${typeCount.map((row) => `${row.rank} = ${row.rank} + ${row.count}`).join(',')};
 			`;
-	await checkDbInsert(user.id, orderedAnimal);
-	return {
-		sql,
-		typeCount: animalCountSql,
-	};
-}
-
-async function checkDbInsert(id, animals) {
-	for (let i in animals) {
-		await cacheUtil.insertAnimal(id, animals[i].value);
-	}
+	await ensureAnimalBatch(user.id, orderedAnimal);
+	return { sql, typeCount };
 }
