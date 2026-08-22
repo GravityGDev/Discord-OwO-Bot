@@ -4,7 +4,7 @@
  * This software is licensed under Creative Commons Attribution-NonCommercial-ShareAlike 4.0 International
  * For more information, see README.md and LICENSE
  */
-const mysql = require('../botHandlers/mysqlHandler.js');
+const mongo = require('./mongo.js');
 const global = require('./global.js');
 
 exports.getAlterCommand = async function (
@@ -17,19 +17,21 @@ exports.getAlterCommand = async function (
 	{ extraReplacers } = {}
 ) {
 	const uid = await global.getUid(user.id);
-	let sql;
+	let collectionName = 'alter';
+	let filter = { uid, command: dbName, type };
 	if (dbName === 'alterhunt' || dbName === 'alterbattle') {
-		sql = `SELECT * FROM ${dbName} WHERE uid = ${uid} AND type = '${type}'`;
-	} else {
-		sql = `SELECT * FROM \`alter\` WHERE uid = ${uid} AND command = '${dbName}' AND type = '${type}'`;
+		collectionName = dbName;
+		filter = { uid, type };
 	}
-	const result = (await mysql.query(sql))[0];
+
+	const collection = await mongo.collection(collectionName);
+	const result = await collection.findOne(filter);
 	if (!result || !result.text) return;
 
 	result.text += appendText || '';
 	result.text = global.replacer(result.text, replacers);
 	try {
-		const extra = JSON.parse(result.extra);
+		const extra = typeof result.extra === 'string' ? JSON.parse(result.extra) : result.extra || {};
 		for (let i in extraReplacers) {
 			if (extra[i]) {
 				result.text = result.text.replace(extraReplacers[i], extra[i]);
