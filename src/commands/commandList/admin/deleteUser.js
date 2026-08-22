@@ -31,10 +31,13 @@ module.exports = new CommandInterface({
 
 		const animals = await p.mongo.collection('animal');
 		const teams = await p.mongo.collection('pet_team');
+		const ownedWeapons = await p.mongo.collection('user_weapon');
 		const animalRows = await animals.find({ id: discordId }, { projection: { pid: 1 } }).toArray();
 		const teamRows = await teams.find({ uid }, { projection: { pgid: 1 } }).toArray();
+		const weaponRows = await ownedWeapons.find({ uid }, { projection: { uwid: 1 } }).toArray();
 		const pids = animalRows.map((row) => row.pid).filter((pid) => pid != null);
 		const pgids = teamRows.map((row) => row.pgid).filter((pgid) => pgid != null);
+		const uwids = weaponRows.map((row) => row.uwid).filter((uwid) => uwid != null);
 
 		const session = await p.mongo.startSession();
 		try {
@@ -46,6 +49,11 @@ module.exports = new CommandInterface({
 			if (pgids.length) teamAnimalFilters.push({ pgid: { $in: pgids } });
 			if (teamAnimalFilters.length) {
 				await teamAnimals.deleteMany({ $or: teamAnimalFilters }, { session });
+			}
+
+			if (uwids.length) {
+				const weaponPassives = await p.mongo.collection('user_weapon_passive');
+				await weaponPassives.deleteMany({ uwid: { $in: uwids } }, { session });
 			}
 
 			const discordIdCollections = [
@@ -115,16 +123,6 @@ module.exports = new CommandInterface({
 
 			const userBattles = await p.mongo.collection('user_battle');
 			await userBattles.deleteMany({ $or: [{ user1: uid }, { user2: uid }] }, { session });
-
-			if (pids.length) {
-				const weaponPassives = await p.mongo.collection('user_weapon_passive');
-				const ownedWeapons = await p.mongo.collection('user_weapon');
-				const weaponRows = await ownedWeapons
-					.find({ uid }, { projection: { uwid: 1 }, session })
-					.toArray();
-				const uwids = weaponRows.map((row) => row.uwid).filter((uwid) => uwid != null);
-				if (uwids.length) await weaponPassives.deleteMany({ uwid: { $in: uwids } }, { session });
-			}
 
 			await users.deleteOne({ id: discordId }, { session });
 			await session.commitTransaction();
