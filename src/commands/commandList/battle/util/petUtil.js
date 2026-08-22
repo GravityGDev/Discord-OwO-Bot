@@ -11,26 +11,91 @@ const WeaponInterface = require('../WeaponInterface.js');
 
 /* get and parse animals from the database */
 exports.getAnimals = async function (p) {
-	/* Query animals and weapons */
-	let sql = `SELECT 
-			animal.name, animal.nickname, animal.pid, animal.xp,
-			user_weapon.uwid, user_weapon.wid, user_weapon.stat, user_weapon.wear,
-			user_weapon_passive.pcount, user_weapon_passive.wpid, user_weapon_passive.stat as pstat,
-			user_weapon_kills.uwid as tt, user_weapon_kills.kills
-		FROM animal
-			LEFT JOIN user_weapon ON user_weapon.pid = animal.pid
-			LEFT JOIN user_weapon_passive ON user_weapon.uwid = user_weapon_passive.uwid
-			LEFT JOIN user_weapon_kills ON user_weapon.uwid = user_weapon_kills.uwid
-		WHERE animal.id = ${p.msg.author.id}
-			AND animal.xp > 0
-		ORDER BY xp DESC LIMIT 25;`;
+	const animalCollection = await p.mongo.collection('animal');
+	const animalRows = await animalCollection
+		.find({ id: String(p.msg.author.id), xp: { $gt: 0 } })
+		.sort({ xp: -1 })
+		.limit(25)
+		.toArray();
+	if (!animalRows.length) return [];
 
-	let result = await p.query(sql);
+	const pids = animalRows.map((animal) => animal.pid);
+	const weaponCollection = await p.mongo.collection('user_weapon');
+	const weaponRows = await weaponCollection.find({ pid: { $in: pids } }).toArray();
+	const uwids = weaponRows.map((weapon) => weapon.uwid).filter((uwid) => uwid != null);
 
-	/* Parse data */
-	let animals = teamUtil.parseTeam(result, result);
+	const passiveMap = new Map();
+	const trackerMap = new Map();
+	if (uwids.length) {
+		const passives = await p.mongo.collection('user_weapon_passive');
+		const passiveRows = await passives
+			.find({ uwid: { $in: uwids } })
+			.sort({ uwid: 1, pcount: 1 })
+			.toArray();
+		for (const passive of passiveRows) {
+			if (!passiveMap.has(passive.uwid)) passiveMap.set(passive.uwid, []);
+			passiveMap.get(passive.uwid).push(passive);
+		}
+
+		const trackers = await p.mongo.collection('user_weapon_kills');
+		const trackerRows = await trackers.find({ uwid: { $in: uwids } }).toArray();
+		for (const tracker of trackerRows) trackerMap.set(tracker.uwid, tracker);
+	}
+
+	const weaponsByPid = new Map();
+	for (const weapon of weaponRows) {
+		if (!weaponsByPid.has(weapon.pid)) weaponsByPid.set(weapon.pid, []);
+		weaponsByPid.get(weapon.pid).push(weapon);
+	}
+
+	const joined = [];
+	for (const animal of animalRows) {
+		const base = {
+			id: animal.id,
+			name: animal.name,
+			nickname: animal.nickname,
+			acensor: animal.offensive || 0,
+			pid: animal.pid,
+			xp: animal.xp || 0,
+		};
+		const equipped = weaponsByPid.get(animal.pid) || [];
+		if (!equipped.length) {
+			joined.push(base);
+			continue;
+		}
+
+		for (const weapon of equipped) {
+			const tracker = trackerMap.get(weapon.uwid);
+			const weaponBase = {
+				...base,
+				uwid: weapon.uwid,
+				wid: weapon.wid,
+				stat: weapon.stat,
+				wear: weapon.wear || 0,
+				rrcount: weapon.rrcount || 0,
+				rrattempt: weapon.rrattempt || 0,
+				favorite: weapon.favorite || 0,
+				tt: tracker ? weapon.uwid : null,
+				kills: tracker?.kills || 0,
+			};
+			const passives = passiveMap.get(weapon.uwid) || [];
+			if (!passives.length) {
+				joined.push(weaponBase);
+			} else {
+				for (const passive of passives) {
+					joined.push({
+						...weaponBase,
+						pcount: passive.pcount,
+						wpid: passive.wpid,
+						pstat: passive.stat,
+					});
+				}
+			}
+		}
+	}
+
+	let animals = teamUtil.parseTeam(joined, joined);
 	for (let i in animals) animalUtil.stats(animals[i]);
-
 	return animals;
 };
 
@@ -93,7 +158,6 @@ exports.getDisplay = function (p, animals) {
 			inline: true,
 		};
 
-		/* Discord embed char limit */
 		letterCount += field.name.length + field.value.length;
 		if (letterCount > 6000) return { embed };
 
