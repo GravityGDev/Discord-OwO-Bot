@@ -49,10 +49,7 @@ exports.hset = async function (table, key, val = 1) {
 	const collection = await hashes();
 	const result = await collection.updateOne(
 		{ key: String(table), field: String(key) },
-		{
-			$set: { value: stringify(val) },
-			$unset: { expiresAt: '' },
-		},
+		{ $set: { value: stringify(val) } },
 		{ upsert: true }
 	);
 	return result.upsertedCount ? 1 : 0;
@@ -91,10 +88,7 @@ exports.hmset = async function (key, val) {
 		entries.map(([field, value]) => ({
 			updateOne: {
 				filter: { key: String(key), field: String(field) },
-				update: {
-					$set: { value: stringify(value) },
-					$unset: { expiresAt: '' },
-				},
+				update: { $set: { value: stringify(value) } },
 				upsert: true,
 			},
 		})),
@@ -106,47 +100,58 @@ exports.hmset = async function (key, val) {
 exports.hincrby = async function (table, key, val = 1) {
 	const collection = await hashes();
 	const filter = { key: String(table), field: String(key) };
-	const existing = await collection.findOne(filter);
-	const next = Number(existing?.value || 0) + Number(val);
 	await collection.updateOne(
 		filter,
-		{
-			$set: { value: String(next) },
-			$unset: { expiresAt: '' },
-		},
+		[
+			{
+				$set: {
+					key: String(table),
+					field: String(key),
+					value: {
+						$toString: {
+							$add: [
+								{
+									$convert: {
+										input: '$value',
+										to: 'long',
+										onError: 0,
+										onNull: 0,
+									},
+								},
+								Number(val),
+							],
+						},
+					},
+				},
+			},
+		],
 		{ upsert: true }
 	);
-	return next;
+	const row = await collection.findOne(filter);
+	return Number(row.value);
 };
 
 // The old adapter exposed `incr` as a sorted-set increment (ZINCRBY).
 exports.incr = async function (table, key, val = 1) {
 	const collection = await sortedSets();
 	const filter = { set: String(table), member: String(key) };
-	await collection.updateOne(
-		filter,
-		{
-			$inc: { score: Number(val) },
-			$unset: { expiresAt: '' },
-		},
-		{ upsert: true }
-	);
+	await collection.updateOne(filter, { $inc: { score: Number(val) } }, { upsert: true });
 	const row = await collection.findOne(filter);
 	return String(row.score);
 };
 
 async function getRange(table, min, max) {
+	const start = Math.max(0, Number(min) || 0);
+	const numericMax = Number(max);
+	if (numericMax >= 0 && numericMax < start) return [];
+
 	const collection = await sortedSets();
 	let cursor = collection
 		.find({ set: String(table) })
 		.sort({ score: -1, member: -1 })
-		.skip(Math.max(0, Number(min) || 0));
+		.skip(start);
 
-	const numericMax = Number(max);
-	if (numericMax >= 0) {
-		const limit = numericMax - Math.max(0, Number(min) || 0) + 1;
-		if (limit > 0) cursor = cursor.limit(limit);
-	}
+	if (numericMax >= 0) cursor = cursor.limit(numericMax - start + 1);
 
 	const rows = await cursor.toArray();
 	const result = [];
@@ -155,7 +160,9 @@ async function getRange(table, min, max) {
 }
 
 exports.getTop = function (table, count = 5) {
-	return getRange(table, 0, Math.max(0, Number(count) - 1));
+	const total = Number(count);
+	if (total <= 0) return Promise.resolve([]);
+	return getRange(table, 0, total - 1);
 };
 
 exports.getRange = getRange;
@@ -187,10 +194,7 @@ exports.sadd = async function (table, value) {
 	const collection = await sets();
 	const result = await collection.updateOne(
 		{ set: String(table), value: stringify(value) },
-		{
-			$setOnInsert: { set: String(table), value: stringify(value) },
-			$unset: { expiresAt: '' },
-		},
+		{ $setOnInsert: { set: String(table), value: stringify(value) } },
 		{ upsert: true }
 	);
 	return result.upsertedCount ? 1 : 0;
