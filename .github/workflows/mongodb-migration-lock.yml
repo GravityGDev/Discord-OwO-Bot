@@ -26,11 +26,9 @@ jobs:
           node-version: 15.14.0
 
       - name: Finalize weapon MongoDB cutover
-        if: github.event_name == 'push'
         run: python3 scripts/finalize-weapon-mongo-cutover.py
 
       - name: Format weapon cutover files
-        if: github.event_name == 'push'
         run: |
           npx -p prettier@2.8.0 prettier --write \
             src/commands/commandList/battle/WeaponInterface.js \
@@ -81,7 +79,6 @@ jobs:
         run: node scripts/audit-mongodb-cutover.js
 
       - name: Commit migration updates when changed
-        if: github.event_name == 'push'
         shell: bash
         run: |
           if git diff --quiet; then
