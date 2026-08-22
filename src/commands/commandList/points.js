@@ -24,18 +24,21 @@ module.exports = new CommandInterface({
 	bot: true,
 
 	execute: async function (p) {
-		//Adds points
-		let sql =
-			'INSERT INTO user (id,count) VALUES (' +
-			p.msg.author.id +
-			',1) ON DUPLICATE KEY ' +
-			'UPDATE count = count + 1;';
-		sql +=
-			'INSERT INTO guild (id,count) VALUES (' +
-			p.msg.channel.guild.id +
-			',1) ON DUPLICATE KEY UPDATE count = count + 1;';
+		const uid = await p.global.getUid(p.msg.author.id);
+		const users = await p.mongo.collection('user');
+		const guilds = await p.mongo.collection('guild');
 
-		await p.query(sql);
+		await users.updateOne(
+			{ id: String(p.msg.author.id) },
+			{ $inc: { count: 1 }, $setOnInsert: { id: String(p.msg.author.id), uid } },
+			{ upsert: true }
+		);
+		await guilds.updateOne(
+			{ id: String(p.msg.channel.guild.id) },
+			{ $inc: { count: 1 }, $setOnInsert: { id: String(p.msg.channel.guild.id) } },
+			{ upsert: true }
+		);
+
 		p.quest('owo');
 		p.logger.incr('cowoncy', 2, { type: 'points' }, p.msg);
 		p.logger.incr('points', 1, {}, p.msg);
