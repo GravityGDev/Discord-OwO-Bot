@@ -143,6 +143,10 @@ async function saveTakedownTracker() {
 
 exports.install = function () {
 	if (installed) return;
+	// A few legacy helper signatures do not receive the command context. Give
+	// them a Mongo-only handle without reintroducing the old query helper.
+	global.main = global.main || { mongo };
+	if (!global.main.mongo) global.main.mongo = mongo;
 	WeaponInterface.prototype.save = saveWeapon;
 	WeaponInterface.prototype.update = updateWeapon;
 	WeaponInterface.prototype.saveTT = saveTakedownTracker;
