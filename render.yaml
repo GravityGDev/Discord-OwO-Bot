@@ -6,8 +6,9 @@ services:
     branch: mongodb-migration
     autoDeployTrigger: checksPass
     buildCommand: npm ci --no-audit --no-fund
-    initialDeployHook: npm run seed:mongo-static
+    preDeployCommand: npm run seed:mongo-static
     startCommand: npm run start:checked
+    maxShutdownDelaySeconds: 60
     envVars:
       - key: NODE_ENV
         value: production
