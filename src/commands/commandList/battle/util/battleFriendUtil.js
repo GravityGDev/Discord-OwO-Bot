@@ -21,15 +21,15 @@ exports.challenge = async function (p, opponent) {
 	const uid2 = await p.global.getUid(user2);
 	const uid = await p.global.getUid(p.msg.author.id);
 
-	let sql = `SELECT * FROM user_battle WHERE (
-			user1 IN (${uid1}, ${uid2}) OR
-			user2 IN (${uid1}, ${uid2})
-		) AND TIMESTAMPDIFF(MINUTE,time,NOW()) < 10;`;
-	sql += `SELECT win1,win2,tie FROM user_battle
-		WHERE user1 = ${uid1} AND user2 = ${uid2};`;
-	let result = await p.query(sql);
+	const battles = await p.mongo.collection('user_battle');
+	const cutoff = new Date(Date.now() - 10 * 60 * 1000);
+	const pending = await battles.findOne({
+		time: { $gt: cutoff },
+		$or: [{ user1: { $in: [uid1, uid2] } }, { user2: { $in: [uid1, uid2] } }],
+	});
+	const previous = await battles.findOne({ user1: uid1, user2: uid2 });
 
-	if (result[0][0]) {
+	if (pending) {
 		p.errorMsg(', There is already a pending battle!', 3000);
 		return;
 	}
@@ -41,7 +41,7 @@ exports.challenge = async function (p, opponent) {
 	}
 	player.username = p.getName();
 	player.id = p.msg.author.id;
-	// todo fix for self battles
+
 	const enemy = await teamUtil.getBattleTeam.bind(p)(
 		{ id: opponent.id },
 		null,
@@ -55,27 +55,35 @@ exports.challenge = async function (p, opponent) {
 	enemy.id = opponent.id;
 
 	let stats = {};
-	stats.tie = result[1][0] ? result[1][0].tie : 0;
-	stats[user1] = result[1][0] ? result[1][0].win1 : 0;
-	stats[user2] = result[1][0] ? result[1][0].win2 : 0;
+	stats.tie = previous ? previous.tie || 0 : 0;
+	stats[user1] = previous ? previous.win1 || 0 : 0;
+	stats[user2] = previous ? previous.win2 || 0 : 0;
 
-	/* Parse flags */
 	let flags = p.args.slice(1);
 	if (p.global.isInt(flags[0])) flags = flags.slice(1);
 	flags = parseFlags(p, flags);
 
-	/* Insert challenge to database */
-	sql = `INSERT INTO user_battle (user1, user2, sender, bet, flags, channel) VALUES
-			(${uid1}, ${uid2}, ${uid}, 0, '${flags}', ${p.msg.channel.id})
-		ON DUPLICATE KEY UPDATE
-			time = NOW(),
-			sender = ${uid},
-			bet = 0,
-			flags = '${flags}',
-			channel = ${p.msg.channel.id};`;
-	result = p.query(sql);
+	await battles.updateOne(
+		{ user1: uid1, user2: uid2 },
+		{
+			$set: {
+				time: new Date(),
+				sender: uid,
+				bet: 0,
+				flags,
+				channel: String(p.msg.channel.id),
+			},
+			$setOnInsert: {
+				user1: uid1,
+				user2: uid2,
+				win1: 0,
+				win2: 0,
+				tie: 0,
+			},
+		},
+		{ upsert: true }
+	);
 
-	/* Send challenge request */
 	let content = toEmbedRequest(p, stats, bet, player, enemy, flags);
 	content.components = [
 		{
@@ -98,7 +106,6 @@ exports.challenge = async function (p, opponent) {
 	];
 	const msg = await p.send(content);
 
-	/* create interaction collector */
 	let filter = (componentName, user) =>
 		['battle_accept', 'battle_decline'].includes(componentName) &&
 		[p.msg.author.id, opponent.id].includes(user.id);
@@ -279,12 +286,13 @@ function toEmbedRequest(p, stats, bet, sender, receiver, flags) {
 }
 
 exports.inBattle = async function (p) {
-	let sql = `SELECT * FROM user_battle WHERE (
-			user1 = (SELECT uid FROM user WHERE id = ${p.msg.author.id}) OR
-			user2 = (SELECT uid FROM user WHERE id = ${p.msg.author.id})
-		) AND TIMESTAMPDIFF(MINUTE,time,NOW()) < 10;`;
-	let result = await p.query(sql);
-	return result[0];
+	const uid = await p.global.getUid(p.msg.author.id);
+	const battles = await p.mongo.collection('user_battle');
+	const cutoff = new Date(Date.now() - 10 * 60 * 1000);
+	return battles.findOne({
+		time: { $gt: cutoff },
+		$or: [{ user1: uid }, { user2: uid }],
+	});
 };
 
 function parseFlags(p, flags) {
