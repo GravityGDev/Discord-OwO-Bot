@@ -5,41 +5,90 @@
  * For more information, see README.md and LICENSE
  */
 
-const redis = require('redis');
-const sub = redis.createClient({
-	host: process.env.REDIS_HOST,
-	password: process.env.REDIS_PASS,
-});
-const pub = redis.createClient({
-	host: process.env.REDIS_HOST,
-	password: process.env.REDIS_PASS,
-});
-
 const requireDir = require('require-dir');
 const dir = requireDir('./pubsubHandlers');
+const mongo = require('./mongo.js');
 
 class PubSub {
 	constructor(main) {
-		// Add all events to an object
+		this.main = main;
 		this.channels = {};
-		for (let listener in dir) {
-			this.channels[listener] = dir[listener];
-		}
+		this.changeStream = null;
+		this.pollTimer = null;
+		this.polling = false;
+		this.lastSeenId = null;
 
-		// Redirect messages to handlers
-		sub.on('message', (channel, message) => {
-			if (this.channels[channel]) {
-				this.channels[channel].handle(main, message);
-			}
+		for (let listener in dir) this.channels[listener] = dir[listener];
+
+		this.init().catch((err) => {
+			console.error('[MongoDB PubSub] Failed to initialize');
+			console.error(err);
 		});
+	}
 
-		// Subscribe to all events in the pubsubHandler folder
-		sub.subscribe(Object.keys(this.channels));
+	async init() {
+		this.collection = await mongo.collection('pubsub_events');
+
+		try {
+			this.changeStream = this.collection.watch([
+				{ $match: { operationType: 'insert' } },
+			]);
+			this.changeStream.on('change', (change) => this.handleDocument(change.fullDocument));
+			this.changeStream.on('error', (err) => {
+				console.error('[MongoDB PubSub] Change stream unavailable, using polling fallback');
+				console.error(err);
+				this.startPolling().catch(console.error);
+			});
+		} catch (err) {
+			console.error('[MongoDB PubSub] Change stream unavailable, using polling fallback');
+			console.error(err);
+			await this.startPolling();
+		}
+	}
+
+	handleDocument(document) {
+		if (!document || !this.channels[document.channel]) return;
+		Promise.resolve(this.channels[document.channel].handle(this.main, document.message)).catch(
+			console.error
+		);
+	}
+
+	async startPolling() {
+		if (this.pollTimer) return;
+		if (!this.collection) this.collection = await mongo.collection('pubsub_events');
+
+		const latest = await this.collection.find().sort({ _id: -1 }).limit(1).next();
+		this.lastSeenId = latest?._id || null;
+
+		this.pollTimer = setInterval(() => this.poll().catch(console.error), 1000);
+		this.pollTimer.unref?.();
+	}
+
+	async poll() {
+		if (this.polling) return;
+		this.polling = true;
+		try {
+			const filter = this.lastSeenId ? { _id: { $gt: this.lastSeenId } } : {};
+			const documents = await this.collection.find(filter).sort({ _id: 1 }).limit(500).toArray();
+			for (const document of documents) {
+				this.lastSeenId = document._id;
+				this.handleDocument(document);
+			}
+		} finally {
+			this.polling = false;
+		}
 	}
 
 	async publish(channel, message = true) {
-		if (typeof message == 'object') message = JSON.stringify(message);
-		return await pub.publish(channel, message);
+		if (!this.collection) this.collection = await mongo.collection('pubsub_events');
+		if (typeof message === 'object') message = JSON.stringify(message);
+
+		const result = await this.collection.insertOne({
+			channel,
+			message: String(message),
+			createdAt: new Date(),
+		});
+		return result.acknowledged ? 1 : 0;
 	}
 }
 
