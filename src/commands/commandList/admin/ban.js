@@ -40,14 +40,24 @@ module.exports = new CommandInterface({
 			reason = '\n**<:blank:427371936482328596> | Reason:** ' + reason;
 		}
 
-		const sqlUsers = [];
-		users.forEach((user) => {
-			sqlUsers.push(`(${user}, NOW(), 1, ${time})`);
-		});
-		const sql = `INSERT INTO timeout (id,time,count,penalty) VALUES ${sqlUsers.join(
-			','
-		)} ON DUPLICATE KEY UPDATE time = NOW(), count=count+1, penalty = ${time};`;
-		await p.query(sql);
+		if (users.length) {
+			const timeout = await p.mongo.collection('timeout');
+			const now = new Date();
+			await timeout.bulkWrite(
+				users.map((user) => ({
+					updateOne: {
+						filter: { id: String(user) },
+						update: {
+							$set: { time: now, penalty: time },
+							$inc: { count: 1 },
+							$setOnInsert: { id: String(user) },
+						},
+						upsert: true,
+					},
+				})),
+				{ ordered: false }
+			);
+		}
 
 		const success = [];
 		const successGuild = [];
