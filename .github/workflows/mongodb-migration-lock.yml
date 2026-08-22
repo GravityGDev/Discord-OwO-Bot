@@ -43,6 +43,10 @@ jobs:
           node --check src/utils/eventUtil.js
           node --check src/utils/giveaway.js
           node --check src/utils/animalInfoUtil.js
+          node --check src/utils/logger.js
+          node --check src/utils/InfoUpdater.js
+          node --check src/utils/streamSocket.js
+          node --check src/utils/snailSocket.js
           node --check src/botHandlers/questHandler.js
           node --check src/commands/command.js
           node --check src/commands/commandList/ranking/rankingMongoUtil.js
@@ -84,6 +88,22 @@ jobs:
           git add package-lock.json
           git commit -m "Update package lock for MongoDB migration"
           git push origin HEAD:mongodb-migration
+
+  dependency-install-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout migration branch
+        uses: actions/checkout@v4
+        with:
+          ref: mongodb-migration
+
+      - name: Use Node.js 15.14.0
+        uses: actions/setup-node@v4
+        with:
+          node-version: 15.14.0
+
+      - name: Verify a fresh dependency install resolves
+        run: npm install --ignore-scripts --no-audit --no-fund
 
   mongo-runtime-smoke:
     runs-on: ubuntu-latest
