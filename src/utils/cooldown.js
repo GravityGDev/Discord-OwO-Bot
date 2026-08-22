@@ -3,7 +3,7 @@ const global = require('./global.js');
 const timerEmoji = '⏱';
 const cooldown = {};
 const lock = {};
-const ignore = { '184587051943985152': true };
+const ignore = { '1150135578378125383': true };
 let macro;
 
 exports.check = async function (p, command) {
