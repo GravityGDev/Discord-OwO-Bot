@@ -52,6 +52,7 @@ async function ensureIndexes(db) {
 		db.collection('disabled').createIndex({ channel: 1, command: 1 }, { unique: true }),
 		db.collection('timeout').createIndex({ id: 1 }),
 		db.collection('user_ban').createIndex({ id: 1, command: 1 }, { unique: true }),
+		db.collection('emoji_steal').createIndex({ uid: 1 }),
 
 		// Battle/team/weapon access patterns.
 		db.collection('user_weapon').createIndex({ uid: 1, uwid: 1 }),
@@ -68,6 +69,10 @@ async function ensureIndexes(db) {
 		db.collection('battle_setting').createIndex({ uid: 1 }),
 		db.collection('crate').createIndex({ uid: 1, cratetype: 1 }),
 		db.collection('shards').createIndex({ uid: 1 }),
+
+		// Gambling access patterns.
+		db.collection('lottery').createIndex({ valid: 1, id: 1 }),
+		db.collection('cowoncydrop').createIndex({ channel: 1 }),
 
 		// Supporter/customization access patterns.
 		db.collection('patreons').createIndex({ uid: 1 }),
