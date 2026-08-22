@@ -88,14 +88,8 @@ class OwO extends Base {
 		// Date utility
 		this.dateUtil = require('./utils/dateUtil.js');
 
-		// Hidden macro detection file
-		try {
-			this.macro = require('./../../tokens/macro.js');
-		} catch (err) {
-			console.error('Could not find macro.js, attempting to use ./secret file...');
-			this.macro = require('../secret/macro.js');
-			console.log('Found macro.js file in secret folder!');
-		}
+		// Optional private anti-macro implementation with a bundled self-host fallback.
+		this.macro = require('./utils/macroLoader.js');
 		this.macro.bind(this, require('merge-images'), require('canvas'));
 		this.cooldown.setMacro(this.macro);
 
