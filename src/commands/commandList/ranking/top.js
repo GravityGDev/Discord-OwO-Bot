@@ -43,7 +43,7 @@ async function display(p, msg, args) {
 		const arg = raw.toLowerCase();
 		if (!type) {
 			if (['points', 'point', 'p'].includes(arg)) type = 'points';
-			else if (['guild', 'server', 's'].includes(arg)) type = 'guild';
+			else if (['guild', 'server', 's', 'g'].includes(arg)) type = 'guild';
 			else if (['zoo', 'z'].includes(arg)) type = 'zoo';
 			else if (['cowoncy', 'money', 'm', 'c', 'cash'].includes(arg)) type = 'money';
 			else if (['cookies', 'cookie', 'rep', 'r'].includes(arg)) type = 'rep';
@@ -56,7 +56,7 @@ async function display(p, msg, args) {
 			else if (['level', 'lvl', 'xp'].includes(arg)) type = 'level';
 			else if (['shards', 'shard', 'ws', 'weaponshard'].includes(arg)) type = 'shard';
 			else if (['tt', 'takedown', 'takdowntracker', 'tracker', 'weapon', 'w'].includes(arg) || weaponArgs.includes(arg)) type = arg;
-			else if (['global', 'g'].includes(arg)) globalRank = true;
+			else if (['global'].includes(arg)) globalRank = true;
 			else if (global.isInt(arg)) count = parseInt(arg);
 			else invalid = true;
 		} else if (['global', 'g'].includes(arg)) globalRank = true;
