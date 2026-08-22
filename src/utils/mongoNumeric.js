@@ -56,8 +56,23 @@ exports.fieldAsDecimal = fieldAsDecimal;
 exports.toBigInt = (value) => BigInt(integerString(value ?? 0));
 
 exports.add = async function (collection, filter, field, amount, options = {}, extraSet = {}) {
+	return collection.updateOne(filter, addFieldPipeline(field, amount, extraSet), options);
+};
+
+exports.changeIfAtLeast = async function (
+	collection,
+	filter,
+	field,
+	minimum,
+	amount,
+	options = {},
+	extraSet = {}
+) {
 	return collection.updateOne(
-		filter,
+		{
+			...filter,
+			$expr: { $gte: [fieldAsDecimal(field), decimal(minimum)] },
+		},
 		addFieldPipeline(field, amount, extraSet),
 		options
 	);
@@ -84,7 +99,6 @@ exports.subtractIfEnough = async function (
 							$subtract: [fieldAsDecimal(field), value],
 						},
 					},
-				},
 			},
 		],
 		options
