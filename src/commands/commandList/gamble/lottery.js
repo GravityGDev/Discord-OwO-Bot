@@ -6,6 +6,7 @@
  */
 
 const CommandInterface = require('../../CommandInterface.js');
+const mongoNumeric = require('../../../utils/mongoNumeric.js');
 
 const maxBet = 250000;
 
@@ -28,19 +29,31 @@ module.exports = new CommandInterface({
 	half: 80,
 	six: 500,
 
-	execute: function (p) {
-		if (p.args.length > 0) bet(p.con, p.msg, p.args, p.global, p);
-		else display(p.con, p.msg, p);
+	execute: async function (p) {
+		if (p.args.length > 0) await bet(p.msg, p.args, p.global, p);
+		else await display(p.msg, p);
 	},
 });
 
-async function bet(con, msg, args, global, p) {
+async function getLotteryTotals(collection) {
+	const result = await collection
+		.aggregate([
+			{ $match: { valid: 1 } },
+			{ $group: { _id: null, sum: { $sum: '$amount' }, count: { $sum: 1 } } },
+		])
+		.toArray();
+	return {
+		sum: Number(result[0]?.sum || 0),
+		count: Number(result[0]?.count || 0),
+	};
+}
+
+async function bet(msg, args, global, p) {
 	let amount = 0;
 	let all = false;
 	if (args.length == 1 && global.isInt(args[0])) amount = parseInt(args[0]);
-	else if (args.length == 1 && args[0] == 'all') {
-		all = true;
-	} else {
+	else if (args.length == 1 && args[0] == 'all') all = true;
+	else {
 		p.errorMsg(', wrong arguments! >:c', 3000);
 		return;
 	}
@@ -53,116 +66,130 @@ async function bet(con, msg, args, global, p) {
 		return;
 	}
 
-	let sql = 'SELECT money FROM cowoncy WHERE id = ' + msg.author.id + ';';
-	sql += 'SELECT * FROM lottery WHERE id = ' + msg.author.id + ' AND valid = 1;';
-	let result = await p.query(sql);
-	if (!result[0][0] || result[0][0].money < amount) {
+	const userId = String(msg.author.id);
+	const balances = await p.mongo.collection('cowoncy');
+	const lottery = await p.mongo.collection('lottery');
+	const balance = await balances.findOne({ id: userId }, { projection: { money: 1 } });
+	const money = mongoNumeric.toBigInt(balance?.money || 0);
+	if (money <= 0n) {
 		p.errorMsg(", You don't have enough cowoncy!", 3000);
 		return;
-	} else {
-		if (all) amount = parseInt(result[0][0].money);
+	}
+	if (all) amount = Number(money > BigInt(maxBet) ? BigInt(maxBet) : money);
 
-		let prevBet = 0;
-		if (result[1][0]) prevBet = result[1][0].amount;
+	const session = await p.mongo.startSession();
+	let prevBet = 0;
+	try {
+		session.startTransaction();
+		const current = await lottery.findOne({ id: userId }, { session, projection: { amount: 1, valid: 1 } });
+		if (current?.valid === 1) prevBet = Number(current.amount || 0);
+
 		if (prevBet >= maxBet) {
+			await session.abortTransaction();
 			p.errorMsg(', You can only bet up to ' + p.global.toFancyNum(maxBet) + ' cowoncy!', 3000);
 			return;
 		}
-
 		if (amount > maxBet - prevBet) amount = maxBet - prevBet;
-		sql =
-			'INSERT INTO lottery (id,channel,amount,valid) VALUES (' +
-			msg.author.id +
-			',' +
-			msg.channel.id +
-			',' +
-			amount +
-			',1) ON DUPLICATE KEY UPDATE amount = amount +' +
-			amount +
-			', valid = 1, channel = ' +
-			msg.channel.id +
-			';' +
-			'SELECT SUM(amount) AS sum,COUNT(id) AS count FROM lottery WHERE valid = 1;' +
-			'UPDATE cowoncy SET money = money - ' +
-			amount +
-			' WHERE id = ' +
-			msg.author.id +
-			';';
-		result = await p.query(sql);
+		if (amount <= 0) {
+			await session.abortTransaction();
+			p.errorMsg(', You bet... nothing?', 3000);
+			return;
+		}
 
-		p.logger.decr('cowoncy', -1 * amount, { type: 'lottery' }, p.msg);
+		const debit = await mongoNumeric.subtractIfEnough(
+			balances,
+			{ id: userId },
+			'money',
+			amount,
+			{ session }
+		);
+		if (!debit.modifiedCount) {
+			await session.abortTransaction();
+			p.errorMsg(", You don't have enough cowoncy!", 3000);
+			return;
+		}
 
-		let sum = parseInt(result[1][0].sum);
-		let bet = prevBet + amount;
-		let chance = (bet / sum) * 100;
-		if (chance >= 0.01) chance = Math.trunc(chance * 100) / 100;
-
-		let embed = {
-			description: 'Lottery ends once a day! The maximum lottery submission is 250k cowoncy!',
-			color: p.config.embed_color,
-			timestamp: new Date(),
-			footer: {
-				icon_url:
-					'https://cdn.discordapp.com/app-icons/408785106942164992/00d934dce5e41c9e956aca2fd3461212.png',
-				text: '*Percentage and jackpot may change over time',
+		await lottery.updateOne(
+			{ id: userId },
+			{
+				$inc: { amount },
+				$set: { channel: String(msg.channel.id), valid: 1 },
+				$setOnInsert: { id: userId },
 			},
-			author: {
-				name: p.getName() + "'s Lottery Submission",
-			},
-			fields: [
-				{
-					name: 'You added',
-					value: '```fix\n' + p.global.toFancyNum(amount) + ' Cowoncy```',
-					inline: true,
-				},
-				{
-					name: 'Your Total Submission',
-					value: '```fix\n' + p.global.toFancyNum(bet) + ' Cowoncy```',
-					inline: true,
-				},
-				{
-					name: 'Winning Chance',
-					value: '```fix\n' + chance + '%```',
-					inline: true,
-				},
-				{
-					name: 'Current Jackpot',
-					value: '```fix\n' + p.global.toFancyNum(sum + 500) + ' Cowoncy```',
-					inline: true,
-				},
-				{
-					name: 'Ends in',
-					value: '```fix\n' + getTimeLeft() + '```',
-					inline: true,
-				},
-			],
-		};
-		p.send({ embed });
+			{ upsert: true, session }
+		);
+		await session.commitTransaction();
+	} catch (err) {
+		if (session.inTransaction()) await session.abortTransaction();
+		console.error(err);
+		p.errorMsg(', I failed to submit that lottery bet. Please try again.', 3000);
+		return;
+	} finally {
+		await session.endSession();
 	}
+
+	p.logger.decr('cowoncy', -1 * amount, { type: 'lottery' }, p.msg);
+
+	const { sum } = await getLotteryTotals(lottery);
+	const totalBet = prevBet + amount;
+	let chance = sum ? (totalBet / sum) * 100 : 100;
+	if (chance >= 0.01) chance = Math.trunc(chance * 100) / 100;
+
+	let embed = {
+		description: 'Lottery ends once a day! The maximum lottery submission is 250k cowoncy!',
+		color: p.config.embed_color,
+		timestamp: new Date(),
+		footer: {
+			icon_url:
+				'https://cdn.discordapp.com/app-icons/408785106942164992/00d934dce5e41c9e956aca2fd3461212.png',
+			text: '*Percentage and jackpot may change over time',
+		},
+		author: {
+			name: p.getName() + "'s Lottery Submission",
+		},
+		fields: [
+			{
+				name: 'You added',
+				value: '```fix\n' + p.global.toFancyNum(amount) + ' Cowoncy```',
+				inline: true,
+			},
+			{
+				name: 'Your Total Submission',
+				value: '```fix\n' + p.global.toFancyNum(totalBet) + ' Cowoncy```',
+				inline: true,
+			},
+			{
+				name: 'Winning Chance',
+				value: '```fix\n' + chance + '%```',
+				inline: true,
+			},
+			{
+				name: 'Current Jackpot',
+				value: '```fix\n' + p.global.toFancyNum(sum + 500) + ' Cowoncy```',
+				inline: true,
+			},
+			{
+				name: 'Ends in',
+				value: '```fix\n' + getTimeLeft() + '```',
+				inline: true,
+			},
+		],
+	};
+	p.send({ embed });
 }
 
-async function display(con, msg, p) {
-	let sql =
-		'SELECT SUM(amount) AS sum,COUNT(id) AS count FROM lottery WHERE valid = 1;' +
-		'SELECT * FROM lottery WHERE id = ' +
-		msg.author.id +
-		' AND valid = 1;';
-	let result = await p.query(sql);
-	let sum = 0;
-	let count = 0;
-	if (result[0][0].sum != undefined) {
-		sum = parseInt(result[0][0].sum);
-		count = result[0][0].count;
-	}
+async function display(msg, p) {
+	const lottery = await p.mongo.collection('lottery');
+	const [{ sum, count }, userBet] = await Promise.all([
+		getLotteryTotals(lottery),
+		lottery.findOne({ id: String(msg.author.id), valid: 1 }, { projection: { amount: 1 } }),
+	]);
 
-	let bet = 0;
+	const totalBet = Number(userBet?.amount || 0);
 	let chance = 0;
-	if (result[1][0] != undefined) {
-		bet = result[1][0].amount;
-		if (sum != 0) {
-			chance = (bet / sum) * 100;
-			if (chance >= 0.01) chance = Math.trunc(chance * 100) / 100;
-		} else chance = 100;
+	if (totalBet) {
+		chance = sum ? (totalBet / sum) * 100 : 100;
+		if (chance >= 0.01) chance = Math.trunc(chance * 100) / 100;
 	}
 
 	let embed = {
@@ -180,7 +207,7 @@ async function display(con, msg, p) {
 		fields: [
 			{
 				name: 'Your Total Submission',
-				value: '```fix\n' + p.global.toFancyNum(bet) + ' Cowoncy```',
+				value: '```fix\n' + p.global.toFancyNum(totalBet) + ' Cowoncy```',
 				inline: true,
 			},
 			{
@@ -193,7 +220,6 @@ async function display(con, msg, p) {
 				value: '```fix\n' + p.global.toFancyNum(count) + ' users```',
 				inline: true,
 			},
-
 			{
 				name: 'Current Jackpot',
 				value: '```fix\n' + p.global.toFancyNum(sum + 500) + ' Cowoncy```',
@@ -209,9 +235,6 @@ async function display(con, msg, p) {
 	p.send({ embed });
 }
 
-/**
- * Time left in the lottery
- */
 function getTimeLeft() {
 	var now = new Date();
 	var mill = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 24, 0, 0, 0) - now;
