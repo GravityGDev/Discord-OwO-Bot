@@ -85,22 +85,5 @@ exports.subtractIfEnough = async function (
 	amount,
 	options = {}
 ) {
-	const value = decimal(amount);
-	return collection.updateOne(
-		{
-			...filter,
-			$expr: { $gte: [fieldAsDecimal(field), value] },
-		},
-		[
-			{
-				$set: {
-					[field]: {
-						$toString: {
-							$subtract: [fieldAsDecimal(field), value],
-						},
-					},
-			},
-		],
-		options
-	);
+	return exports.changeIfAtLeast(collection, filter, field, amount, -BigInt(integerString(amount)), options);
 };
