@@ -8,6 +8,7 @@
 		"clientOptions": {
 			"autoreconnect": true,
 			"compress": false,
+			"intents": 130813,
 			"disableEvents": {
 				"TYPING_START": true,
 				"VOICE_SERVER_UPDATE": true,
