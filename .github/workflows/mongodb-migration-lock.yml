@@ -68,6 +68,7 @@ jobs:
           node --check scripts/migrate-redis-to-mongodb.js
           node --check scripts/audit-mongodb-cutover.js
           node --check scripts/smoke-mongo-runtime.js
+          node --check scripts/smoke-module-load.js
           node --check scripts/seed-mongodb-static.js
           node --check scripts/preflight-runtime.js
 
@@ -130,6 +131,9 @@ jobs:
 
       - name: Verify required native modules load
         run: node -e "require('canvas'); console.log('Native modules loaded')"
+
+      - name: Verify OwO runtime module tree loads
+        run: node scripts/smoke-module-load.js
 
   mongo-runtime-smoke:
     runs-on: ubuntu-latest
