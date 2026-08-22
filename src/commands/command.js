@@ -275,6 +275,7 @@ function initParam(msg, command, args, main, context) {
 		client: main.bot,
 		animalUtil: main.animalUtil,
 		dbl: main.dbl,
+		mongo: main.mongo,
 		mysql: main.mysql,
 		con: main.mysql.con,
 		startTransaction: main.mysqlhandler.startTransaction,
@@ -411,9 +412,12 @@ function getContext(args, prefix, content) {
 
 async function acceptedRules(main, msg) {
 	if (!msg.author.acceptedRules) {
-		let sql = `SELECT rules.* FROM rules INNER JOIN user ON user.uid = rules.uid WHERE id = ${msg.author.id};`;
-		let result = await main.mysqlhandler.query(sql);
-		msg.author.acceptedRules = !!result[0];
+		const rules = await main.mongo.collection('rules');
+		const result = await rules.findOne(
+			{ _id: String(msg.author.id), opinion: 1 },
+			{ projection: { _id: 1 } }
+		);
+		msg.author.acceptedRules = !!result;
 	}
 	return msg.author.acceptedRules;
 }
