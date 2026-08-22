@@ -77,10 +77,15 @@ async function writeBatch(collection, table, rows, primaryKey) {
 	await collection.bulkWrite(
 		rows.map((row) => {
 			const document = toDocument(table, row, primaryKey);
+			const id = document._id;
+			delete document._id;
 			return {
 				updateOne: {
-					filter: { _id: document._id },
-					update: { $set: document },
+					filter: { _id: id },
+					update: {
+						$set: document,
+						$setOnInsert: { _id: id },
+					},
 					upsert: true,
 				},
 			};
