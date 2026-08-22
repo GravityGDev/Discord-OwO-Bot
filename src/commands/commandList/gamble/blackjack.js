@@ -6,6 +6,7 @@
  */
 
 const CommandInterface = require('../../CommandInterface.js');
+const mongoNumeric = require('../../../utils/mongoNumeric.js');
 
 const maxBet = 250000;
 const deck = [
@@ -37,13 +38,9 @@ module.exports = new CommandInterface({
 	bot: true,
 
 	execute: async function (p) {
-		let args = p.args,
-			msg = p.msg;
-
-		//Check if there is a bet amount
 		let amount = 1;
-		if (p.global.isInt(args[0])) amount = parseInt(args[0]);
-		if (args[0] == 'all') amount = 'all';
+		if (p.global.isInt(p.args[0])) amount = parseInt(p.args[0]);
+		if (p.args[0] == 'all') amount = 'all';
 		else if (amount == undefined) {
 			p.send('**🚫 | ' + p.getName() + '**, Invalid arguments!', 3000);
 			p.setCooldown(5);
@@ -54,59 +51,115 @@ module.exports = new CommandInterface({
 			return;
 		}
 
-		let sql = 'SELECT money FROM cowoncy WHERE id = ' + msg.author.id + ';';
-		sql +=
-			'SELECT * FROM blackjack LEFT JOIN blackjack_card ON blackjack.bjid = blackjack_card.bjid WHERE id = ' +
-			msg.author.id +
-			' AND active = 1 ORDER BY sort ASC, dealer DESC;';
-		if (amount == 'all')
-			if (maxBet)
-				sql +=
-					'UPDATE cowoncy LEFT JOIN blackjack ON cowoncy.id = blackjack.id SET money = (IF(money >' +
-					maxBet +
-					',money - ' +
-					maxBet +
-					',0)) WHERE cowoncy.id = ' +
-					msg.author.id +
-					' AND money > 0 AND (active = 0 OR active IS NULL);';
-			else
-				sql +=
-					'UPDATE cowoncy LEFT JOIN blackjack ON cowoncy.id = blackjack.id SET money = 0 WHERE cowoncy.id = ' +
-					msg.author.id +
-					' AND money > 0 AND (active = 0 OR active IS NULL);';
-		else {
-			if (maxBet && amount > maxBet) amount = maxBet;
-			sql +=
-				'UPDATE cowoncy LEFT JOIN blackjack ON cowoncy.id = blackjack.id SET money = money - ' +
-				amount +
-				' WHERE cowoncy.id = ' +
-				msg.author.id +
-				' AND money >= ' +
-				amount +
-				' AND (active = 0 OR active IS NULL);';
+		const userId = String(p.msg.author.id);
+		const existing = await getActiveGame(p, userId);
+		if (existing) {
+			await blackjack(p, existing.player, existing.dealer, existing.bet, true);
+			return;
 		}
-		let result = await p.query(sql);
 
-		//Check for existing match
-		if (result[1][0]) {
-			await initBlackjack(p, 1, result[1]);
-		} else if (result[0][0] && result[0][0].money) {
-			let money = result[0][0].money;
-			if (maxBet && money > maxBet) money = maxBet;
-			if (amount == 'all') {
-				if (money <= 0)
-					p.send('**🚫 | ' + p.getName() + '**, You do not have enough cowoncy!', 3000);
-				else await initBlackjack(p, money);
-			} else {
-				if (money < amount)
-					p.send('**🚫 | ' + p.getName() + '**, You do not have enough cowoncy!', 3000);
-				else await initBlackjack(p, amount);
-			}
-		} else {
+		const balances = await p.mongo.collection('cowoncy');
+		const balance = await balances.findOne({ id: userId }, { projection: { money: 1 } });
+		const money = mongoNumeric.toBigInt(balance?.money || 0);
+		if (money <= 0n) {
 			p.send('**🚫 | ' + p.getName() + '**, You do not have enough cowoncy!', 3000);
+			return;
 		}
+
+		if (amount == 'all') amount = Number(money > BigInt(maxBet) ? BigInt(maxBet) : money);
+		else if (maxBet && amount > maxBet) amount = maxBet;
+		if (amount <= 0 || money < BigInt(amount)) {
+			p.send('**🚫 | ' + p.getName() + '**, You do not have enough cowoncy!', 3000);
+			return;
+		}
+
+		const tdeck = deck.slice(0);
+		const player = [await bjUtil.randCard(tdeck, 'f'), await bjUtil.randCard(tdeck, 'f')];
+		const dealer = [await bjUtil.randCard(tdeck, 'f'), await bjUtil.randCard(tdeck, 'b')];
+		const games = await p.mongo.collection('blackjack');
+		const session = await p.mongo.startSession();
+		let raceGame;
+		try {
+			session.startTransaction();
+			raceGame = await getActiveGame(p, userId, session);
+			if (raceGame) {
+				await session.abortTransaction();
+			} else {
+				const debit = await mongoNumeric.subtractIfEnough(
+					balances,
+					{ id: userId },
+					'money',
+					amount,
+					{ session }
+				);
+				if (!debit.modifiedCount) {
+					await session.abortTransaction();
+					p.send('**🚫 | ' + p.getName() + '**, You do not have enough cowoncy!', 3000);
+					return;
+				}
+
+				await games.updateOne(
+					{ id: userId },
+					{
+						$set: {
+							id: userId,
+							bet: amount,
+							date: new Date(),
+							active: 1,
+							player,
+							dealer,
+						},
+					},
+					{ upsert: true, session }
+				);
+				await session.commitTransaction();
+			}
+		} catch (err) {
+			if (session.inTransaction()) await session.abortTransaction();
+			console.error(err);
+			p.errorMsg(', I failed to start that blackjack game. Please try again.', 3000);
+			return;
+		} finally {
+			await session.endSession();
+		}
+
+		if (raceGame) {
+			await blackjack(p, raceGame.player, raceGame.dealer, raceGame.bet, true);
+			return;
+		}
+
+		await blackjack(p, player, dealer, amount);
+		p.quest('gamble');
 	},
 });
+
+async function getActiveGame(p, id, session) {
+	const games = await p.mongo.collection('blackjack');
+	const options = session ? { session } : {};
+	const game = await games.findOne({ id: String(id), active: 1 }, options);
+	if (!game) return null;
+	if (Array.isArray(game.player) && Array.isArray(game.dealer)) return game;
+	if (game.bjid === undefined || game.bjid === null) return null;
+
+	const cards = await p.mongo.collection('blackjack_card');
+	const rows = await cards
+		.find({ bjid: game.bjid }, options)
+		.sort({ sort: 1, dealer: -1 })
+		.toArray();
+	if (!rows.length) return null;
+
+	const player = [];
+	const dealer = [];
+	for (const row of rows) {
+		if (row.dealer == 0) player.push({ card: row.card, type: 'c' });
+		else if (row.dealer == 1) dealer.push({ card: row.card, type: 'b' });
+		else dealer.push({ card: row.card, type: 'c' });
+	}
+	if (!session) {
+		await games.updateOne({ id: String(id), active: 1 }, { $set: { player, dealer } });
+	}
+	return { ...game, player, dealer };
+}
 
 async function blackjack(p, player, dealer, bet, resume) {
 	let embed = bjUtil.generateEmbed(p.msg.author, dealer, player, bet);
@@ -115,27 +168,22 @@ async function blackjack(p, player, dealer, bet, resume) {
 	if (resume) embed.footer.text = '🎲 ~ resuming previous game';
 
 	let message = await p.send({ embed });
-
 	await message.addReaction(hitEmoji);
 	await message.addReaction(stopEmoji);
 
 	let collector = p.reactionCollector.create(message, filter, { time: 60000 });
-
 	collector.on('collect', async function (emoji) {
-		let query = await parseQuery({ p: p, id: p.msg.author.id });
-		let nPlayer = query.player;
-		let nDealer = query.dealer;
-		if (!nPlayer || !nDealer) {
+		const game = await getActiveGame(p, p.msg.author.id);
+		if (!game?.player || !game?.dealer) {
 			collector.stop('done');
 			message.edit('**🚫 |** This match is already finished');
 			return;
 		}
-		//HIT
-		if (emoji.name == hitEmoji) await hit(p, nPlayer, nDealer, message, bet, collector);
-		//STOP
-		else if (emoji.name == stopEmoji) {
+		if (emoji.name == hitEmoji) {
+			await hit(p, game.player, game.dealer, message, game.bet, collector);
+		} else if (emoji.name == stopEmoji) {
 			collector.stop('done');
-			await stop(p, nPlayer, nDealer, message, bet);
+			await stop(p, game.player, game.dealer, message, game.bet);
 		}
 	});
 
@@ -143,35 +191,6 @@ async function blackjack(p, player, dealer, bet, resume) {
 		if (reason == 'time')
 			message.edit('**⏱ |** This session has expired. Retype `owo blackjack` to resume');
 	});
-}
-
-async function initBlackjack(p, bet, existing) {
-	//If existing match
-	if (existing) {
-		let { player, dealer } = await parseQuery({ query: existing });
-		if (!player || !dealer) {
-			p.send('Uh oh.. something went wrong...');
-			return;
-		}
-		bet = existing[0].bet;
-		await blackjack(p, player, dealer, bet, true);
-	} else {
-		let tdeck = deck.slice(0);
-		let player = [await bjUtil.randCard(tdeck, 'f'), await bjUtil.randCard(tdeck, 'f')];
-		let dealer = [await bjUtil.randCard(tdeck, 'f'), await bjUtil.randCard(tdeck, 'b')];
-		let sql =
-			'INSERT INTO blackjack (id,bet,date,active) VALUES (' +
-			p.msg.author.id +
-			',' +
-			bet +
-			',NOW(),1) ON DUPLICATE KEY UPDATE bet = ' +
-			bet +
-			',date = NOW(), active = 1;';
-		sql += bjUtil.generateSQL(player, dealer, p.msg.author.id);
-		await p.query(sql);
-		await blackjack(p, player, dealer, bet);
-		p.quest('gamble');
-	}
 }
 
 async function hit(p, player, dealer, msg, bet, collector) {
@@ -187,28 +206,28 @@ async function hit(p, player, dealer, msg, bet, collector) {
 
 	if (ppoints > 21) {
 		collector.stop('done');
-		stop(p, player, dealer, msg, bet, true);
-	} else {
-		let sql =
-			'INSERT INTO blackjack_card (bjid,card,dealer,sort) VALUES ((SELECT bjid FROM blackjack WHERE id = ' +
-			p.msg.author.id +
-			'),' +
-			card.card +
-			',0,' +
-			player.length +
-			') ON DUPLICATE KEY UPDATE dealer = 0,sort= ' +
-			player.length +
-			';';
-		p.con.query(sql, function (err, _result) {
-			if (err) {
-				console.error(err);
-				msg.edit('Something went wrong...');
-				return;
-			}
-			let embed = bjUtil.generateEmbed(p.msg.author, dealer, player, bet);
-			msg.edit({ embed });
-		});
+		await stop(p, player, dealer, msg, bet, true);
+		return;
 	}
+
+	const games = await p.mongo.collection('blackjack');
+	const storedPlayer = player.map((entry) => ({ card: entry.card, type: 'c' }));
+	const storedDealer = dealer.map((entry) => ({
+		card: entry.card,
+		type: entry.type == 'b' ? 'b' : 'c',
+	}));
+	const result = await games.updateOne(
+		{ id: String(p.msg.author.id), active: 1 },
+		{ $set: { player: storedPlayer, dealer: storedDealer } }
+	);
+	if (!result.matchedCount) {
+		collector.stop('done');
+		msg.edit('**🚫 |** This match is already finished');
+		return;
+	}
+
+	let embed = bjUtil.generateEmbed(p.msg.author, dealer, player, bet);
+	msg.edit({ embed });
 }
 
 async function stop(p, player, dealer, msg, bet, fromHit) {
@@ -221,96 +240,92 @@ async function stop(p, player, dealer, msg, bet, fromHit) {
 	let ppoints = bjUtil.cardValue(player).points;
 	let dpoints = bjUtil.cardValue(dealer).points;
 	let tdeck = bjUtil.initDeck(deck.slice(0), player, dealer);
-
 	while (dpoints < 17) {
 		dealer.push(await bjUtil.randCard(tdeck, 'f'));
 		dpoints = bjUtil.cardValue(dealer).points;
 	}
 
-	//sql get winner
-	let winner = undefined;
-	//both bust
+	let winner;
 	if (ppoints > 21 && dpoints > 21) winner = 'tb';
-	//tie
 	else if (ppoints == dpoints) winner = 't';
-	//player bust
 	else if (ppoints > 21) winner = 'l';
-	//dealer bust
 	else if (dpoints > 21) winner = 'w';
-	//player win
 	else if (ppoints > dpoints) winner = 'w';
-	//dealer win
 	else winner = 'l';
 
-	let sql = 'UPDATE blackjack SET active = 0 WHERE id = ' + p.msg.author.id + ' AND active > 0;';
-	let sql2 =
-		'DELETE FROM blackjack_card WHERE bjid = (SELECT bjid FROM blackjack WHERE id = ' +
-		p.msg.author.id +
-		');';
-	if (winner == 'w')
-		sql2 +=
-			'UPDATE cowoncy SET money = money + ' + bet * 2 + ' WHERE id = ' + p.msg.author.id + ';';
-	else if (winner == 't' || winner == 'tb')
-		sql2 += 'UPDATE cowoncy SET money = money + ' + bet + ' WHERE id = ' + p.msg.author.id + ';';
-	p.con.query(sql, function (err, result) {
-		if (err) {
-			console.error(err);
-			msg.edit('Something went wrong...');
+	const games = await p.mongo.collection('blackjack');
+	const cards = await p.mongo.collection('blackjack_card');
+	const balances = await p.mongo.collection('cowoncy');
+	const session = await p.mongo.startSession();
+	let settled = false;
+	try {
+		session.startTransaction();
+		const current = await games.findOne(
+			{ id: String(p.msg.author.id), active: 1 },
+			{ session, projection: { bjid: 1 } }
+		);
+		if (!current) {
+			await session.abortTransaction();
 			return;
 		}
-		if (result.changedRows > 0) {
-			p.con.query(sql2, function (err, _result) {
-				if (err) {
-					console.error(err);
-					msg.edit('Something went wrong...');
-					return;
-				}
-				if (winner == 'w') {
-					// TODO neo4j
-					p.logger.incr(`gamble.blackjack.${p.msg.author.id}`);
-					p.logger.incr(`cowoncy.blackjack.${p.msg.author.id}`, bet);
-				} else if (winner == 'l') {
-					// TODO neo4j
-					p.logger.decr(`gamble.blackjack.${p.msg.author.id}`);
-					p.logger.decr(`cowoncy.blackjack.${p.msg.author.id}`, -1 * bet);
-				}
-				let embed = bjUtil.generateEmbed(p.msg.author, dealer, player, bet, winner, bet);
-				msg.edit({ embed });
-			});
-		}
-	});
-}
 
-async function parseQuery(info) {
-	if (info.query) {
-		let query = info.query;
-		if (!query[0]) return {};
-		else {
-			let player = [];
-			let dealer = [];
-			for (let i = 0; i < query.length; i++) {
-				if (query[i].dealer == 0) player.push({ card: query[i].card, type: 'c' });
-				else if (query[i].dealer == 1) dealer.push({ card: query[i].card, type: 'b' });
-				else dealer.push({ card: query[i].card, type: 'c' });
-			}
-			return { player, dealer };
+		const result = await games.updateOne(
+			{ id: String(p.msg.author.id), active: 1 },
+			{
+				$set: {
+					active: 0,
+					player: player.map((entry) => ({ card: entry.card, type: 'c' })),
+					dealer: dealer.map((entry) => ({ card: entry.card, type: 'c' })),
+					winner,
+					endedAt: new Date(),
+				},
+			},
+			{ session }
+		);
+		if (!result.modifiedCount) {
+			await session.abortTransaction();
+			return;
 		}
-	} else {
-		let sql =
-			'SELECT * FROM blackjack LEFT JOIN blackjack_card ON blackjack.bjid = blackjack_card.bjid WHERE id = ' +
-			info.id +
-			' AND active = 1 ORDER BY sort ASC ,dealer DESC;';
-		let result = await info.p.query(sql);
-		if (!result[0]) return {};
-		else {
-			let player = [];
-			let dealer = [];
-			for (let i = 0; i < result.length; i++) {
-				if (result[i].dealer == 0) player.push({ card: result[i].card, type: 'c' });
-				else if (result[i].dealer == 1) dealer.push({ card: result[i].card, type: 'b' });
-				else dealer.push({ card: result[i].card, type: 'c' });
-			}
-			return { player, dealer };
+
+		if (winner == 'w') {
+			await mongoNumeric.add(
+				balances,
+				{ id: String(p.msg.author.id) },
+				'money',
+				bet * 2,
+				{ upsert: true, session }
+			);
+		} else if (winner == 't' || winner == 'tb') {
+			await mongoNumeric.add(
+				balances,
+				{ id: String(p.msg.author.id) },
+				'money',
+				bet,
+				{ upsert: true, session }
+			);
 		}
+		if (current.bjid !== undefined && current.bjid !== null) {
+			await cards.deleteMany({ bjid: current.bjid }, { session });
+		}
+		await session.commitTransaction();
+		settled = true;
+	} catch (err) {
+		if (session.inTransaction()) await session.abortTransaction();
+		console.error(err);
+		msg.edit('Something went wrong...');
+		return;
+	} finally {
+		await session.endSession();
 	}
+
+	if (!settled) return;
+	if (winner == 'w') {
+		p.logger.incr(`gamble.blackjack.${p.msg.author.id}`);
+		p.logger.incr(`cowoncy.blackjack.${p.msg.author.id}`, bet);
+	} else if (winner == 'l') {
+		p.logger.decr(`gamble.blackjack.${p.msg.author.id}`);
+		p.logger.decr(`cowoncy.blackjack.${p.msg.author.id}`, -1 * bet);
+	}
+	let embed = bjUtil.generateEmbed(p.msg.author, dealer, player, bet, winner, bet);
+	msg.edit({ embed });
 }
