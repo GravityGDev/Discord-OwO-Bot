@@ -8,6 +8,8 @@
 const EventEmitter = require('eventemitter3');
 const axios = require('axios');
 
+const DISCORD_API = 'https://discord.com/api/v10';
+
 class InteractionCollector {
 	constructor(main) {
 		this.main = main;
@@ -31,7 +33,7 @@ class InteractionCollector {
 		if (listener) {
 			listener.interact(data, member || user, id, token, entitlements);
 		} else {
-			const url = `https://discord.com/api/v8/interactions/${id}/${token}/callback`;
+			const url = `${DISCORD_API}/interactions/${id}/${token}/callback`;
 			const content = {
 				content: '🚫 **|** You cannot use this button',
 				flags: 64,
@@ -62,7 +64,7 @@ class InteractionEventEmitter extends EventEmitter {
 
 	interact(component, user, id, token, entitlements) {
 		if (!this.checkFilter(component.custom_id, user)) {
-			const url = `https://discord.com/api/v8/interactions/${id}/${token}/callback`;
+			const url = `${DISCORD_API}/interactions/${id}/${token}/callback`;
 			const content = {
 				content: '🚫 **|** You cannot use this button',
 				flags: 64,
@@ -73,7 +75,7 @@ class InteractionEventEmitter extends EventEmitter {
 			});
 		}
 		if (this.ended) {
-			const url = `https://discord.com/api/v8/interactions/${id}/${token}/callback`;
+			const url = `${DISCORD_API}/interactions/${id}/${token}/callback`;
 			const content = {
 				content: '🚫 **|** This button is no longer active',
 				flags: 64,
@@ -84,7 +86,7 @@ class InteractionEventEmitter extends EventEmitter {
 			});
 		}
 
-		const url = `https://discord.com/api/v8/interactions/${id}/${token}/callback`;
+		const url = `${DISCORD_API}/interactions/${id}/${token}/callback`;
 		function ack(content) {
 			if (content) {
 				if (typeof content === 'string') {
@@ -99,9 +101,8 @@ class InteractionEventEmitter extends EventEmitter {
 					type: 7,
 					data: newContent,
 				});
-			} else {
-				return axios.post(url, { type: 1 });
 			}
+			return axios.post(url, { type: 6 });
 		}
 
 		function err(content) {
@@ -112,7 +113,6 @@ class InteractionEventEmitter extends EventEmitter {
 				content.embeds = [content.embed];
 				delete content.embed;
 			}
-			const url = `https://discord.com/api/v8/interactions/${id}/${token}/callback`;
 			content.flags = 64;
 			return axios.post(url, {
 				type: 4,
