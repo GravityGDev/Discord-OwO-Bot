@@ -24,13 +24,14 @@ module.exports = new CommandInterface({
 			return;
 		}
 
-		let sql = `SELECT money FROM cowoncy WHERE id = ${p.args[0]};
-			   UPDATE cowoncy SET money = 0 WHERE id = ${p.args[0]};`;
-		let result = await p.query(sql);
-		let cowoncy = result[0][0] ? result[0][0].money : undefined;
+		const balances = await p.mongo.collection('cowoncy');
+		const id = String(p.args[0]);
+		const previous = await balances.findOne({ id }, { projection: { money: 1 } });
+		if (previous) await balances.updateOne({ id }, { $set: { money: '0' } });
+		const cowoncy = previous?.money;
 
-		let warn = p.args.slice(1).join(' ');
-		let user = await p.sender.msgUser(
+		const warn = p.args.slice(1).join(' ');
+		const user = await p.sender.msgUser(
 			p.args[0],
 			'**⚠ |** Your cowoncy has been reset due to: **' + warn + '**'
 		);
