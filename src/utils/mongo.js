@@ -46,6 +46,8 @@ async function ensureIndexes(db) {
 		db.collection('cowoncy_limit').createIndex({ id: 1 }, { unique: true }),
 		db.collection('transaction').createIndex({ sender: 1, createdAt: -1 }),
 		db.collection('transaction').createIndex({ reciever: 1, createdAt: -1 }),
+		db.collection('animals').createIndex({ name: 1 }, { unique: true }),
+		db.collection('animals').createIndex({ rank: 1 }),
 		db.collection('animal').createIndex({ id: 1, name: 1 }, { unique: true }),
 		db.collection('animal').createIndex({ pid: 1 }, { unique: true, sparse: true }),
 		db.collection('quest').createIndex({ uid: 1, qid: 1 }, { unique: true }),
