@@ -12,9 +12,9 @@ const liftEmoji = '🙇';
 const timerEmoji = '⏱';
 
 exports.check = async function (p, command) {
-	let channel = p.msg.channel.id;
-	let guild = p.msg.channel.guild?.id || 0;
-	let author = p.msg.author.id;
+	let channel = String(p.msg.channel.id);
+	let guild = String(p.msg.channel.guild?.id || 0);
+	let author = String(p.msg.author.id);
 
 	if (cooldown[author + command]) return;
 
@@ -59,19 +59,30 @@ exports.check = async function (p, command) {
 		}
 	}
 
-	//Check if the command is enabled
-	let commandNames = `'all','${command}'`;
-	for (let i in p.commands[command].group) {
-		commandNames += ",'" + p.commands[command].group[i] + "'";
-	}
-	let sql = `SELECT * FROM disabled WHERE command IN (${commandNames}) AND channel = ${channel};
-				SELECT id FROM timeout WHERE id IN (${author},${guild}) AND TIMESTAMPDIFF(HOUR,time,NOW()) < penalty;
-				SELECT * FROM user_ban WHERE id = ${author} AND command = '${command}';`;
-	let result = await p.query(sql);
-	if (result[1][0]) {
+	const commandNames = ['all', command, ...p.commands[command].group];
+	const [disabledCollection, timeoutCollection, userBanCollection] = await Promise.all([
+		p.mongo.collection('disabled'),
+		p.mongo.collection('timeout'),
+		p.mongo.collection('user_ban'),
+	]);
+
+	const [disabled, timeoutRows, userBan] = await Promise.all([
+		disabledCollection.findOne({ channel, command: { $in: commandNames } }),
+		timeoutCollection.find({ id: { $in: [author, guild] } }).toArray(),
+		userBanCollection.findOne({ id: author, command }),
+	]);
+
+	const now = Date.now();
+	const timedOut = timeoutRows.some((row) => {
+		const time = row.time instanceof Date ? row.time.getTime() : new Date(row.time).getTime();
+		const penaltyHours = Number(row.penalty || 0);
+		return Number.isFinite(time) && now - time < penaltyHours * 60 * 60 * 1000;
+	});
+
+	if (timedOut) {
 		// User in timeout
 		p.logger.logstashBanned(p.commandAlias, p);
-	} else if (result[2][0]) {
+	} else if (userBan) {
 		// User is banned from this command
 		cooldown[author + command] = true;
 		setTimeout(() => {
@@ -85,7 +96,7 @@ exports.check = async function (p, command) {
 			}
 		}
 		p.logger.logstashBanned(p.commandAlias, p);
-	} else if (!result[0][0] || ['points', 'disable', 'enable'].includes(command)) {
+	} else if (!disabled || ['points', 'disable', 'enable'].includes(command)) {
 		// Success
 		return true;
 	} else {
@@ -105,12 +116,20 @@ exports.check = async function (p, command) {
 };
 
 exports.banCommand = async function (p, user, command, reason) {
-	let sql = `INSERT IGNORE INTO user_ban (id,command) VALUES (${user.id},?);`;
-	let result = await p.query(sql, [command]);
-	if (!result.affectedRows) {
-		sql = `INSERT IGNORE INTO user (id,count) VALUES (${user.id},0);${sql}`;
-		await p.query(sql, [command]);
-	}
+	await p.global.getUid(user.id);
+	const userBans = await p.mongo.collection('user_ban');
+	await userBans.updateOne(
+		{ id: String(user.id), command },
+		{
+			$setOnInsert: {
+				_id: `user_ban:${encodeURIComponent(String(user.id))}:${encodeURIComponent(command)}`,
+				id: String(user.id),
+				command,
+			},
+		},
+		{ upsert: true }
+	);
+
 	try {
 		await (
 			await user.getDMChannel()
@@ -162,10 +181,10 @@ exports.banCommand = async function (p, user, command, reason) {
 };
 
 exports.liftCommand = async function (p, user, command) {
-	let sql = `DELETE FROM user_ban WHERE id = ${user.id} AND command = ?;`;
-	let result = await p.query(sql, [command]);
+	const userBans = await p.mongo.collection('user_ban');
+	const result = await userBans.deleteOne({ id: String(user.id), command });
 
-	if (result.affectedRows) {
+	if (result.deletedCount) {
 		try {
 			await (
 				await user.getDMChannel()
