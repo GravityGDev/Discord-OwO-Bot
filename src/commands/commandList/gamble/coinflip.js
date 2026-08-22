@@ -65,7 +65,7 @@ module.exports = new CommandInterface({
 		else if (arg1 == 'tails' || arg1 == 't' || arg1 == 'tail') choice = 't';
 
 		if (bet == 0) {
-			p.errorMsg(" , You can't bet 0 dum dum!".trimStart(), 3000);
+			p.errorMsg(", You can't bet 0 dum dum!", 3000);
 			p.setCooldown(5);
 			return;
 		} else if (bet < 0) {
@@ -106,22 +106,13 @@ module.exports = new CommandInterface({
 
 		const rand = await random(0, 1);
 		const win = (rand == 0 && choice == 't') || (rand == 1 && choice == 'h');
-		let mutation;
-		if (win) {
-			mutation = await mongoNumeric.add(
-				balances,
-				{ id: String(msg.author.id) },
-				'money',
-				bet
-			);
-		} else {
-			mutation = await mongoNumeric.subtractIfEnough(
-				balances,
-				{ id: String(msg.author.id) },
-				'money',
-				bet
-			);
-		}
+		const mutation = await mongoNumeric.changeIfAtLeast(
+			balances,
+			{ id: String(msg.author.id) },
+			'money',
+			bet,
+			win ? bet : -bet
+		);
 		if (!mutation.modifiedCount) {
 			p.send('**🚫 | ' + p.getName() + "**, You don't have enough cowoncy!", 3000);
 			return;
