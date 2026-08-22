@@ -10,6 +10,13 @@ const io = require('socket.io-client');
 class SnailSocket {
 	constructor(main) {
 		this.main = main;
+		this.socket = null;
+
+		if (!process.env.SNAIL_SOCKET) {
+			console.log('[SnailSocket] Disabled; SNAIL_SOCKET is not configured');
+			return;
+		}
+
 		this.socket = io(process.env.SNAIL_SOCKET, {
 			auth: {
 				token: process.env.SNAIL_TOKEN,
@@ -30,10 +37,12 @@ class SnailSocket {
 	}
 
 	messageChannel(channelId, contents) {
+		if (!this.socket) return;
 		this.socket.emit('message-channel', { channelId, contents });
 	}
 
 	userBanned(userId, isBanned) {
+		if (!this.socket) return;
 		this.socket.emit('user-banned', { userId, isBanned });
 	}
 }
