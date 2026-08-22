@@ -111,9 +111,7 @@ async function hydrateWeaponRows(weaponDocs) {
 	for (const weapon of weaponDocs) {
 		const key = String(weapon.uwid);
 		const animal =
-			weapon.pid === null || weapon.pid === undefined
-				? null
-				: animalsByPid.get(String(weapon.pid));
+			weapon.pid === null || weapon.pid === undefined ? null : animalsByPid.get(String(weapon.pid));
 		const tracker = killsByWeapon.get(key);
 		const base = {
 			id: usersByUid.get(String(weapon.uid)),
@@ -210,13 +208,10 @@ async function removeWeaponsAndCredit(p, uid, candidateUwids, priceEach) {
 		await killsCollection.deleteMany({ uwid: { $in: uwids } }, { session });
 
 		const total = deleted.deletedCount * priceEach;
-		await mongoNumeric.add(
-			cowoncyCollection,
-			{ id: String(p.msg.author.id) },
-			'money',
-			total,
-			{ session, upsert: true }
-		);
+		await mongoNumeric.add(cowoncyCollection, { id: String(p.msg.author.id) }, 'money', total, {
+			session,
+			upsert: true,
+		});
 		await session.commitTransaction();
 		return { count: deleted.deletedCount, total, uwids: uwids.slice(0, deleted.deletedCount) };
 	} catch (err) {
@@ -1045,109 +1040,63 @@ exports.sell = async function (p, uwid) {
 };
 
 let sellRank = (exports.sellRank = async function (p, rankLoc) {
-	// (min,max]
-	let min = 0,
-		max = 0;
+	let min = 0;
+	let max = 0;
 	for (let i = 0; i <= rankLoc; i++) {
-		let rank = WeaponInterface.ranks[i];
+		const rankInfo = WeaponInterface.ranks[i];
 		min = max;
-		max += rank[0];
+		max += rankInfo[0];
 	}
 	min *= 100;
 	max *= 100;
-	let lastRank = rankLoc == WeaponInterface.ranks.length - 1;
+	const lastRank = rankLoc == WeaponInterface.ranks.length - 1;
+	const uid = await p.global.getUid(p.msg.author.id);
+	const collection = await mongo.collection('user_weapon');
+	const avg = min === 0 ? { $gte: min } : { $gt: min };
+	if (!lastRank) avg.$lte = max;
 
-	/* Grab the item we will sell */
-	let sql = `SELECT
-			a.uwid, a.wid, a.stat, a.rrcount, a.rrattempt, a.wear,
-			b.pcount, b.wpid, b.stat as pstat,
-			c.uwid as tt, c.kills
-		FROM user
-			LEFT JOIN user_weapon a ON user.uid = a.uid
-			LEFT JOIN user_weapon_passive b ON a.uwid = b.uwid
-			LEFT JOIN user_weapon_kills c ON a.uwid = c.uwid
-		WHERE user.id = ${p.msg.author.id} AND avg >${min === 0 ? '=' : ''} ${min} ${
-		lastRank ? '' : `AND avg <= ${max}`
-	} AND a.pid IS NULL AND a.favorite != 1 LIMIT 500;`;
-
-	let result = await p.query(sql);
-
-	/* not a real weapon! */
-	if (!result[0]) {
+	const weaponDocs = await collection
+		.find({ uid, avg, pid: null, favorite: { $ne: 1 } })
+		.limit(500)
+		.toArray();
+	if (!weaponDocs.length) {
 		p.errorMsg(', you do not have any weapons with this rank!', 3000);
 		return;
 	}
 
-	/* Parse emoji and uwid */
-	let weapon = parseWeaponQuery(result);
-	let weapons = [];
-	let weaponsSQL = [];
-	let price;
-	let rank;
-	for (let key in weapon) {
-		let tempWeapon = parseWeapon(weapon[key]);
-		if (!tempWeapon.unsellable) {
-			weapons.push(tempWeapon.emoji);
-			weaponsSQL.push(tempWeapon.ruwid);
-		}
-		/* Get weapon price */
-		if (!price) {
-			price = prices[tempWeapon.rank.name];
-			rank = tempWeapon.rank.emoji + ' **' + tempWeapon.rank.name + '**';
-		}
+	const rows = await hydrateWeaponRows(weaponDocs);
+	const parsed = parseWeaponQuery(rows);
+	const sellable = [];
+	for (const key in parsed) {
+		const weapon = parseWeapon(parsed[key]);
+		if (weapon && !weapon.unsellable) sellable.push(weapon);
 	}
-	weaponsSQL = '(' + weaponsSQL.join(',') + ')';
-
-	if (weapons.length <= 0) {
+	if (!sellable.length) {
 		p.errorMsg(', you do not have any weapons with this rank!', 3000);
 		return;
 	}
 
-	if (!price) {
+	const priceEach = prices[WeaponInterface.ranks[rankLoc][1]];
+	if (!priceEach) {
 		p.errorMsg(', Something went terribly wrong...');
 		return;
 	}
-
-	sql = `DELETE user_weapon_passive FROM user
-		LEFT JOIN user_weapon ON user.uid = user_weapon.uid
-		LEFT JOIN user_weapon_passive ON user_weapon.uwid = user_weapon_passive.uwid
-		WHERE id = ${p.msg.author.id}
-			AND user_weapon_passive.uwid IN ${weaponsSQL}
-			AND user_weapon.pid IS NULL;`;
-	sql += `DELETE user_weapon_kills FROM user
-		LEFT JOIN user_weapon ON user.uid = user_weapon.uid
-		LEFT JOIN user_weapon_kills ON user_weapon.uwid = user_weapon_kills.uwid
-		WHERE id = ${p.msg.author.id}
-			AND user_weapon_kills.uwid IN ${weaponsSQL}
-			AND user_weapon.pid IS NULL;`;
-	sql += `DELETE user_weapon FROM user
-		LEFT JOIN user_weapon ON user.uid = user_weapon.uid
-		WHERE id = ${p.msg.author.id}
-			AND user_weapon.uwid IN ${weaponsSQL}
-			AND user_weapon.pid IS NULL;`;
-
-	result = await p.query(sql);
-
-	/* Check if deleted */
-	if (result[2].affectedRows == 0) {
-		p.errorMsg(', you do not have a weapon with this id!', 3000);
+	const byId = new Map(sellable.map((weapon) => [Number(weapon.ruwid), weapon]));
+	const result = await removeWeaponsAndCredit(p, uid, [...byId.keys()], priceEach);
+	if (!result.count) {
+		p.errorMsg(', you do not have any weapons with this rank!', 3000);
 		return;
 	}
-
-	/* calculate rewards */
-	price *= result[2].affectedRows;
-
-	/* Give cowoncy */
-	sql = `UPDATE cowoncy SET money = money + ${price} WHERE id = ${p.msg.author.id}`;
-	result = await p.query(sql);
+	const sold = result.uwids.map((id) => byId.get(Number(id))).filter(Boolean);
+	const rank = `${WeaponInterface.ranks[rankLoc][2]} **${WeaponInterface.ranks[rankLoc][1]}**`;
 
 	p.replyMsg(
 		weaponEmoji,
-		`, You sold all your ${rank} weapons for **${price}** cowoncy!\n${
+		`, You sold all your ${rank} weapons for **${result.total}** cowoncy!\n${
 			p.config.emoji.blank
-		} **| Sold:** ${weapons.join('')}`
+		} **| Sold:** ${sold.map((weapon) => weapon.emoji).join('')}`
 	);
-	p.logger.incr('cowoncy', price, { type: 'sell' }, p.msg);
+	p.logger.incr('cowoncy', result.total, { type: 'sell' }, p.msg);
 });
 
 /* Shorten a uwid to base36 */
