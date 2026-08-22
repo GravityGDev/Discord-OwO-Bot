@@ -40,10 +40,12 @@ module.exports = new CommandInterface({
 		let commands = p.args.slice();
 		for (let i = 0; i < commands.length; i++) commands[i] = commands[i].toLowerCase();
 
+		const channel = String(p.msg.channel.id);
+		const disabled = await p.mongo.collection('disabled');
+
 		/* If the user wants to enable all commands */
 		if (commands.includes('all')) {
-			let sql = 'DELETE FROM disabled WHERE channel = ' + p.msg.channel.id;
-			await p.query(sql);
+			await disabled.deleteMany({ channel });
 			p.replyMsg(settingEmoji, ', **All** commands have been **enabled** for this channel!');
 			return;
 		}
@@ -72,13 +74,10 @@ module.exports = new CommandInterface({
 			}
 		}
 		if (remove.size) {
-			await p.query(
-				'DELETE FROM disabled WHERE channel = ' +
-					p.msg.channel.id +
-					" AND command IN ('all','" +
-					Array.from(remove).join("','") +
-					"');"
-			);
+			await disabled.deleteMany({
+				channel,
+				command: { $in: ['all', ...Array.from(remove)] },
+			});
 		}
 
 		p.send(await enabledUtil.createEmbed(p));
