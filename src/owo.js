@@ -17,16 +17,24 @@ class OwO extends Base {
 		super(bot);
 		this.dbl = dbl;
 
-		// Mysql connection
+		// MongoDB is the target persistence layer for all bot state.
+		this.mongo = require('./utils/mongo.js');
+		this.mongoReady = this.mongo.connect();
+		this.mongoReady.catch((err) => {
+			console.error('[MongoDB] Initial connection failed');
+			console.error(err);
+		});
+
+		// Temporary legacy SQL connection while command domains are migrated.
 		this.mysql = require('./utils/mysql.js');
 
-		// Redis connection
+		// MongoDB-backed compatibility cache (keeps the previous Redis API shape).
 		this.redis = require('./utils/redis.js');
 
 		// Neo4j Logging
 		this.neo4j = require('./utils/neo4j.js');
 
-		// Redis pubsub to communicate with all the other shards/processes
+		// MongoDB pubsub to communicate with all the other shards/processes.
 		this.pubsub = new (require('./utils/pubsub.js'))(this);
 
 		// Handles discord interaction events
@@ -58,7 +66,7 @@ class OwO extends Base {
 		// Quest Handler
 		this.questHandler = new (require('./botHandlers/questHandler.js'))();
 
-		// Mysql Query Handler
+		// Temporary legacy SQL query handler while command domains are migrated.
 		this.mysqlhandler = require('./botHandlers/mysqlHandler.js');
 		this.query = this.mysqlhandler.query;
 
