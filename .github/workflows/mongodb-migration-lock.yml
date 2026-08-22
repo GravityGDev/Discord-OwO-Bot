@@ -29,14 +29,25 @@ jobs:
         run: |
           node --check src/utils/mongo.js
           node --check src/utils/mongoCounters.js
+          node --check src/utils/mongoNumeric.js
           node --check src/utils/redis.js
           node --check src/utils/pubsub.js
           node --check src/utils/cacheUtil.js
+          node --check src/utils/ban.js
           node --check src/commands/command.js
           node --check src/commands/commandList/utils/rules.js
+          node --check src/commands/commandList/utils/disable.js
+          node --check src/commands/commandList/utils/enable.js
+          node --check src/commands/commandList/utils/utils/enabledUtil.js
           node --check src/commands/commandList/economy/cowoncy.js
+          node --check src/commands/commandList/economy/give.js
+          node --check src/commands/commandList/economy/utils/cowoncyUtils.js
           node --check scripts/migrate-mysql-to-mongodb.js
           node --check scripts/migrate-redis-to-mongodb.js
+          node --check scripts/audit-mongodb-cutover.js
+
+      - name: Audit remaining SQL call sites
+        run: node scripts/audit-mongodb-cutover.js
 
       - name: Commit lockfile when changed
         shell: bash
