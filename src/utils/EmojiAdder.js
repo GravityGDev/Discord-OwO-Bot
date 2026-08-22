@@ -24,16 +24,18 @@ module.exports = class EmojiAdder {
 		if (this.progress.has(userId)) return;
 		this.progress.add(userId);
 
-		// Fetch guild id
-		let sql = `SELECT emoji_steal.guild FROM emoji_steal INNER JOIN user ON emoji_steal.uid = user.uid WHERE id = ${userId};`;
-		let result = await this.p.query(sql);
-		if (!result || !result[0]) {
+		const users = await this.p.mongo.collection('user');
+		const steals = await this.p.mongo.collection('emoji_steal');
+		const user = await users.findOne({ id: String(userId) }, { projection: { uid: 1 } });
+		const steal = user
+			? await steals.findOne({ uid: user.uid }, { projection: { guild: 1 } })
+			: null;
+		if (!steal?.guild) {
 			this.progress.delete(userId);
 			return;
 		}
-		let guildId = result[0].guild;
+		const guildId = String(steal.guild);
 
-		// Add emoji to guild
 		try {
 			if (!this.buffer) {
 				if (this.isSticker) {
