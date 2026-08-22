@@ -16,6 +16,7 @@ class OwO extends Base {
 	constructor(bot) {
 		super(bot);
 		this.dbl = dbl;
+		this.shuttingDown = false;
 
 		// MongoDB is the runtime persistence layer for bot state.
 		this.mongo = require('./utils/mongo.js');
@@ -52,7 +53,6 @@ class OwO extends Base {
 		this.debug = this.config.debug;
 		this.prefix = this.config.prefix;
 		this.optOut = {};
-		this.setOptOut();
 
 		// Ban check
 		this.ban = require('./utils/ban.js');
@@ -70,7 +70,11 @@ class OwO extends Base {
 		this.global.init(this);
 
 		this.animalUtil = require('./utils/animalInfoUtil.js');
-		this.animalUtil.setBot(this);
+		this.animalReady = this.animalUtil.setBot(this);
+		this.animalReady.catch((err) => {
+			console.error('[Startup] Failed to initialize animal catalog');
+			console.error(err);
+		});
 
 		this.rewardUtil = require('./utils/rewardUtil.js');
 
@@ -95,13 +99,13 @@ class OwO extends Base {
 		this.macro.bind(this, require('merge-images'), require('canvas'));
 		this.cooldown.setMacro(this.macro);
 
-		// Allows me to check catch before any fetch requests (reduces api calls)
+		// Allows me to check cache before any fetch requests (reduces api calls)
 		this.fetch = new (require('./utils/fetch.js'))(this);
 
 		// Creates a reaction collector for a message (works for uncached messages too)
 		this.reactionCollector = new (require('./utils/reactionCollector.js'))(this);
 
-		// Creates a reaction collector for a message (works for uncached messages too)
+		// Creates an interaction collector for a message
 		this.interactionCollector = new (require('./utils/interactionCollector.js'))(this);
 
 		// Fetches images and converts them to buffers
@@ -125,20 +129,62 @@ class OwO extends Base {
 		}
 
 		this.giveaway = require('./utils/giveaway.js');
-		this.giveaway.checkGiveawayTimeout(this);
 
 		// Create commands
 		this.command = new (require('./commands/command.js'))(this);
 	}
 
-	launch() {
-		// Bind bot events
+	async launch() {
+		try {
+			// eris-sharder loads this app after Discord is ready. Do not bind command/event
+			// handlers until every Mongo-backed startup dependency is ready as well.
+			await Promise.all([this.mongoReady, this.pubsub.ready, this.animalReady]);
+			await this.setOptOut();
+			await this.giveaway.checkGiveawayTimeout(this);
+		} catch (err) {
+			console.error('[Startup] MongoDB-backed runtime initialization failed');
+			console.error(err);
+			try {
+				await this.pubsub.close();
+				await this.mongo.close();
+			} catch (closeErr) {
+				console.error('[Startup] Failed while closing MongoDB resources');
+				console.error(closeErr);
+			}
+			process.exit(1);
+			return;
+		}
+
+		this.installShutdownHandlers();
+
+		// Bind bot events only after MongoDB-backed state is ready.
 		this.eventHandler = new EventHandler(this);
 
 		// sends info to our main server every X seconds
 		this.InfoUpdater = new (require('./utils/InfoUpdater.js'))(this);
 
 		this.logger.logstashQos('launch');
+		console.log('[Startup] MongoDB runtime ready; event handlers enabled');
+	}
+
+	installShutdownHandlers() {
+		const shutdown = async (signal) => {
+			if (this.shuttingDown) return;
+			this.shuttingDown = true;
+			console.log(`[Shutdown] Received ${signal}; closing MongoDB resources`);
+			try {
+				await this.pubsub.close();
+				await this.mongo.close();
+			} catch (err) {
+				console.error('[Shutdown] Failed to close MongoDB resources cleanly');
+				console.error(err);
+			} finally {
+				process.exit(0);
+			}
+		};
+
+		process.once('SIGTERM', () => shutdown('SIGTERM'));
+		process.once('SIGINT', () => shutdown('SIGINT'));
 	}
 
 	async setOptOut() {
