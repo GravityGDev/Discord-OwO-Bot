@@ -176,6 +176,33 @@ async function migrateRules(db) {
 	console.log(`Finished rules: ${rows.length.toLocaleString()} rows`);
 }
 
+async function seedCounterFromCollection(db, counterName, collectionName, field) {
+	const latest = await db.collection(collectionName).find().sort({ [field]: -1 }).limit(1).next();
+	const value = Number(latest?.[field] || 0);
+	await db.collection('counters').updateOne(
+		{ _id: counterName },
+		{ $max: { value } },
+		{ upsert: true }
+	);
+	console.log(`Seeded counter ${counterName} at ${value}`);
+}
+
+async function ensureRuntimeIndexes(db) {
+	const jobs = [];
+	jobs.push(db.collection('user').createIndex({ uid: 1 }, { unique: true }));
+	jobs.push(db.collection('animal').createIndex({ pid: 1 }, { unique: true, sparse: true }));
+	await Promise.all(jobs);
+}
+
+async function seedRuntimeCounters(db, tables) {
+	if (tables.includes('user')) {
+		await seedCounterFromCollection(db, 'user_uid', 'user', 'uid');
+	}
+	if (tables.includes('animal')) {
+		await seedCounterFromCollection(db, 'animal_pid', 'animal', 'pid');
+	}
+}
+
 async function main() {
 	console.log('Starting MySQL/MariaDB -> MongoDB migration');
 	console.log(`Batch size: ${batchSize.toLocaleString()}`);
@@ -186,6 +213,8 @@ async function main() {
 
 	for (const table of tables) await migrateTable(db, table);
 	if (tables.includes('rules') && tables.includes('user')) await migrateRules(db);
+	await ensureRuntimeIndexes(db);
+	await seedRuntimeCounters(db, tables);
 
 	console.log('SQL data migration complete.');
 }
