@@ -5,13 +5,12 @@
  * For more information, see README.md and LICENSE
  */
 
-const whitelist = [
-	'409959187229966337',
-	'420104212895105044',
-	'552384921914572802',
-	'1149820261168849006',
-	'1218415296646484008',
-];
+const debugGuilds = new Set(
+	(process.env.DEBUG_GUILD_IDS || '')
+		.split(',')
+		.map((id) => id.trim())
+		.filter(Boolean)
+);
 const levels = require('../utils/levels.js');
 /* eslint-disable-next-line */
 const blacklist = require('../utils/blacklist.js');
@@ -23,14 +22,15 @@ exports.handle = async function (msg, raw) {
 	if (this.optOut[msg.author.id]) return;
 	if (this.pause) return;
 
-	//Ignore if bot
+	// Ignore if bot
 	if (msg.author.bot) {
 		return;
 	} else if (
-		/* Ignore guilds if in debug mode */
+		/* Debug mode is single-shard, not single-server. Only restrict guilds when explicitly configured. */
 		this.debug &&
+		debugGuilds.size &&
 		msg.channel.guild &&
-		!whitelist.includes(msg.channel.guild.id)
+		!debugGuilds.has(msg.channel.guild.id)
 	) {
 		return;
 	} else if (await this.command.executeAdmin(msg, raw)) {
@@ -42,7 +42,13 @@ exports.handle = async function (msg, raw) {
 			survey.handle.bind(this)(msg);
 		}
 	} else {
-		this.command.execute(msg, raw);
-		levels.giveXP(msg);
+		this.command.execute(msg, raw).catch((err) => {
+			console.error('[Command] Failed to execute message command');
+			console.error(err);
+		});
+		levels.giveXP(msg).catch((err) => {
+			console.error('[XP] Failed to process message XP');
+			console.error(err);
+		});
 	}
 };
