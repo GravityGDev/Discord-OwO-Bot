@@ -5,13 +5,18 @@
  * For more information, see README.md and LICENSE
  */
 require('dotenv').config();
-if (!process.env.BOT_TOKEN) {
-	console.error('Bot token not found in ~/.env file. Checking secret file instead...');
-	require('dotenv').config({ path: './secret/env' });
-	if (!process.env.BOT_TOKEN) {
-		console.error('No bot token found. Please edit ./secret/env file and add your token');
-		return;
-	}
+
+const missingRuntimeConfig = [];
+if (!process.env.BOT_TOKEN) missingRuntimeConfig.push('BOT_TOKEN');
+if (!process.env.MONGODB_URI && !process.env.MONGO_URI) missingRuntimeConfig.push('MONGODB_URI');
+
+if (missingRuntimeConfig.length) {
+	console.error(
+		`Missing required runtime environment variable(s): ${missingRuntimeConfig.join(', ')}. ` +
+			'Configure them in your host environment or a local .env file before starting the bot.'
+	);
+	process.exitCode = 1;
+	return;
 }
 
 // Config file
@@ -32,7 +37,7 @@ let clusters = 60;
 
 (async () => {
 	try {
-		//determine how many shards we will need for this manager
+		// determine how many shards we will need for this manager
 		if (!debug && cluster.isMaster) {
 			result = await request.fetchInit();
 			console.log(result);
@@ -62,11 +67,10 @@ let clusters = 60;
 			lastShardID,
 		});
 
-		if (cluster.isMaster) {
-			rateLimitUtil.init(sharder.bucket, debug);
-		}
+		if (cluster.isMaster) rateLimitUtil.init(sharder.bucket, debug);
 	} catch (e) {
 		console.error('Failed to start eris sharder');
 		console.error(e);
+		process.exitCode = 1;
 	}
 })();
