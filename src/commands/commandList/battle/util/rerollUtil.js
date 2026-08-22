@@ -16,12 +16,10 @@ const rerollPrice = 100;
 const shardEmoji = '<:weaponshard:655902978712272917>';
 
 exports.reroll = async function (p) {
-	// Parse argments
 	let args = parseArgs(p);
 	if (!args) return;
 	let { rrType, uwid } = args;
 
-	// Grab weapon
 	let weapon = await getWeapon(p, uwid);
 	if (!weapon) return;
 
@@ -30,7 +28,6 @@ exports.reroll = async function (p) {
 		return;
 	}
 
-	// Check if enough shards
 	if (!(await useShards(p))) {
 		p.errorMsg(
 			', you need ' + rerollPrice + ' ' + shardEmoji + ' Weapon Shards to reroll a weapon!',
@@ -39,18 +36,12 @@ exports.reroll = async function (p) {
 		return;
 	}
 
-	// Update rr attempt
 	await updateRRAttempt(p, weapon);
-
-	// Get rerolled weapon
 	let newWeapon = fetchNewWeapon(p, weapon, rrType);
-
-	// Send message
 	await sendMessage(p, weapon, newWeapon, rrType);
 };
 
 function parseArgs(p) {
-	/* Parse reroll type and weapon id */
 	let rrType, uwid;
 	if (passiveArray.includes(p.args[1]?.toLowerCase())) {
 		rrType = 'p';
@@ -72,7 +63,6 @@ function parseArgs(p) {
 		return;
 	}
 
-	/* Convert uwid into decimal */
 	uwid = weaponUtil.expandUWID(uwid);
 	if (!uwid) {
 		p.errorMsg(
@@ -85,9 +75,7 @@ function parseArgs(p) {
 }
 
 async function getWeapon(p, uwid) {
-	const weapon = weaponUtil.getWeapon(uwid, p.msg.author.id);
-
-	/* If no weapon */
+	const weapon = await weaponUtil.getWeapon(uwid, p.msg.author.id);
 	if (!weapon) {
 		p.errorMsg(
 			', I could not find a weapon with that unique weapon id! Please use `owo weapon` for the weapon ID!',
@@ -98,18 +86,13 @@ async function getWeapon(p, uwid) {
 		p.errorMsg(", I can't reroll this weapon!", 4000);
 		return;
 	}
-
 	return weapon;
 }
 
 async function sendMessage(p, oldWeapon, newWeapon, rrType, msg, ack) {
 	let content = createContent(p, oldWeapon, newWeapon);
-	if (!msg) {
-		/* send and construct reaction collector */
-		msg = await p.send(content);
-	} else {
-		ack(content);
-	}
+	if (!msg) msg = await p.send(content);
+	else ack(content);
 
 	let filter = (componentName, reactionUser) =>
 		['rr_confirm', 'rr_cancel', 'rr_reroll'].includes(componentName) &&
@@ -167,10 +150,13 @@ async function sendMessage(p, oldWeapon, newWeapon, rrType, msg, ack) {
 }
 
 async function useShards(p) {
-	/* check if enough shards */
-	let sql = `UPDATE shards INNER JOIN user ON shards.uid = user.uid SET shards.count = shards.count - ${rerollPrice} WHERE user.id = ${p.msg.author.id} AND shards.count >= ${rerollPrice};`;
-	let result = await p.query(sql);
-	if (result.changedRows >= 1) {
+	const uid = await p.global.getUid(p.msg.author.id);
+	const shards = await p.mongo.collection('shards');
+	const result = await shards.updateOne(
+		{ uid, count: { $gte: rerollPrice } },
+		{ $inc: { count: -rerollPrice } }
+	);
+	if (result.modifiedCount >= 1) {
 		p.logger.decr('shards', -1 * rerollPrice, { type: 'reroll' }, p.msg);
 		return true;
 	}
@@ -178,16 +164,13 @@ async function useShards(p) {
 }
 
 function fetchNewWeapon(p, weapon, type) {
-	/* Get new weapon */
 	let newWeapon;
 	if (type == 'p') newWeapon = weapon.rerollPassives();
 	else if (type == 's') newWeapon = weapon.rerollStats();
 	else p.errorMsg(', It seems like javascript broke.. This should never happen!', 3000);
 	newWeapon.uwid = weapon.uwid;
 	newWeapon.ruwid = weapon.ruwid;
-	for (let i in weapon.passives) {
-		newWeapon.passives[i].pcount = weapon.passives[i].pcount;
-	}
+	for (let i in weapon.passives) newWeapon.passives[i].pcount = weapon.passives[i].pcount;
 	return newWeapon;
 }
 
@@ -220,30 +203,21 @@ function createContent(p, oldWeapon, newWeapon) {
 					label: 'Confirm',
 					style: 3,
 					custom_id: 'rr_confirm',
-					emoji: {
-						id: null,
-						name: yesEmoji,
-					},
+					emoji: { id: null, name: yesEmoji },
 				},
 				{
 					type: 2,
 					label: 'Cancel',
 					style: 4,
 					custom_id: 'rr_cancel',
-					emoji: {
-						id: null,
-						name: noEmoji,
-					},
+					emoji: { id: null, name: noEmoji },
 				},
 				{
 					type: 2,
 					label: 'Reroll',
 					style: 2,
 					custom_id: 'rr_reroll',
-					emoji: {
-						id: null,
-						name: retryEmoji,
-					},
+					emoji: { id: null, name: retryEmoji },
 				},
 			],
 		},
@@ -263,9 +237,7 @@ function parseDescription(title, weapon) {
 	if (weapon.buffList.length > 0) {
 		desc += '\n';
 		let buffs = weapon.getBuffs();
-		for (let i in buffs) {
-			desc += `${buffs[i].emoji} **${buffs[i].name}** - ${buffs[i].desc}\n`;
-		}
+		for (let i in buffs) desc += `${buffs[i].emoji} **${buffs[i].name}** - ${buffs[i].desc}\n`;
 	}
 	if (weapon.passives.length <= 0) desc += '\n**Passives:** None';
 	for (let i = 0; i < weapon.passives.length; i++) {
@@ -276,7 +248,7 @@ function parseDescription(title, weapon) {
 }
 
 async function updateRRAttempt(p, weapon) {
-	const sql = `UPDATE user_weapon SET rrattempt = rrattempt + 1 WHERE uwid = ${weapon.ruwid};`;
-	await p.query(sql);
+	const weapons = await p.mongo.collection('user_weapon');
+	await weapons.updateOne({ uwid: weapon.ruwid }, { $inc: { rrattempt: 1 } });
 	weapon.rrAttempt++;
 }
