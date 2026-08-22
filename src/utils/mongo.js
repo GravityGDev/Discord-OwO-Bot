@@ -46,6 +46,9 @@ async function ensureIndexes(db) {
 		db.collection('animal').createIndex({ id: 1, name: 1 }, { unique: true }),
 		db.collection('animal').createIndex({ pid: 1 }, { unique: true, sparse: true }),
 		db.collection('quest').createIndex({ uid: 1 }),
+		db.collection('disabled').createIndex({ channel: 1, command: 1 }, { unique: true }),
+		db.collection('timeout').createIndex({ id: 1 }),
+		db.collection('user_ban').createIndex({ id: 1, command: 1 }, { unique: true }),
 	]);
 
 	indexesReady = true;
