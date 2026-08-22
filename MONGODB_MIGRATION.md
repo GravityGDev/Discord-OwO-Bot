@@ -1,27 +1,33 @@
 # MongoDB Migration
 
-This branch is converting OwO Bot from the original MySQL + Redis persistence stack to MongoDB.
+This branch converts OwO Bot from the original MySQL + Redis persistence stack to MongoDB.
 
 ## Current migration state
 
-MongoDB is now the runtime backend for:
+The bot runtime is now MongoDB-only for application persistence. The strict cutover audit reports zero legacy SQL/MySQL markers under `src/`, and CI fails if a runtime SQL dependency is reintroduced.
 
-- shared Mongo connection/index management
-- the former Redis hash/set/sorted-set compatibility API
+MongoDB now backs:
+
+- shared Mongo connection and index management
+- the former Redis hash/set/sorted-set runtime API
 - cross-shard pub/sub
-- rules acceptance and the global rules gate
-- shared user UID allocation
-- shared quest and animal cache helpers
-- command bans, timeouts, and disabled-command checks
-- disable/enable command configuration
-- cowoncy balance reads
-- `owo give` balance transfers, transfer limits, and transaction logging
+- users, guild settings, rules, bans, cooldown/config state and command settings
+- quests, surveys, voting and checklist state
+- Cowoncy balances, transfers, transactions and gambling
+- daily rewards, claims, Patreon rewards and shared reward delivery
+- inventory, trading, gems, lootboxes and weapon crates
+- zoo animals, zoo totals, hunt, HuntBot, sacrifice, selling and upgrades
+- battle teams, pets, weapons, crates and friendly battle state
+- event items and giveaways
+- ranking and leaderboard reads
 
-MySQL is intentionally still initialized on this branch because several command domains still contain raw SQL. Do not remove the MySQL dependency or deploy with MySQL disabled until `npm run audit:mongo-cutover -- --strict` passes.
+The old runtime MySQL pool and MySQL command query handler have been removed. `src/owo.js` no longer initializes MySQL and command parameters no longer expose SQL connections/query helpers.
+
+The `mysql` and `redis` npm packages are temporarily retained only for the one-time source-data import scripts. They are not part of the bot's runtime persistence path.
 
 ## MongoDB requirements
 
-Use MongoDB Atlas or a MongoDB replica set. Multi-document transactions are required for economy transfers. Change streams are used for pub/sub when available; a polling fallback exists for pub/sub, but transactions still require replica-set/Atlas support.
+Use MongoDB Atlas or another MongoDB replica set. Multi-document transactions are required by economy, inventory, reward, giveaway and other mutation paths. Change streams are used for pub/sub when available; a polling fallback exists for pub/sub, but transactions still require a replica set or Atlas.
 
 Required runtime variables:
 
@@ -30,43 +36,47 @@ MONGODB_URI=...
 MONGODB_DB=owo
 ```
 
-See `.env.example` for optional pool settings and temporary source-database variables.
+See `.env.example` for optional MongoDB pool settings and temporary source-database variables.
 
 ## Data migration
 
-Back up MySQL/MariaDB and Redis before running either migration script.
+Back up MySQL/MariaDB and Redis before running either source migration.
 
 ```bash
 npm run migrate:mysql-to-mongo
 npm run migrate:redis-to-mongo
 ```
 
-The MySQL migration is batch-based and idempotent. Existing BIGINT values are imported as strings to prevent JavaScript from rounding Discord snowflakes or large counters. Runtime economy arithmetic uses MongoDB Decimal128 expressions while storing the final integer value as a string.
+The MySQL migration is batch-based and idempotent. Existing BIGINT values are imported as strings to prevent JavaScript from rounding Discord snowflakes or large counters. Runtime economy arithmetic uses MongoDB Decimal128 expressions while storing final integer values exactly.
 
-The Redis migration copies hashes, sorted sets, sets, and TTLs into MongoDB compatibility collections.
+The Redis migration copies hashes, sorted sets, sets and TTLs into the MongoDB compatibility collections used by the runtime Redis-shaped API.
+
+Do not remove the `mysql` or `redis` npm packages until the corresponding one-time source migration is no longer needed.
 
 ## Cutover audit
 
-Run:
+Run the normal report with:
 
 ```bash
 npm run audit:mongo-cutover
 ```
 
-For a hard gate:
+Run the hard gate with:
 
 ```bash
 npm run audit:mongo-cutover -- --strict
 ```
 
-The migration branch CI also reports remaining files that contain MySQL/SQL markers.
+The migration branch CI uses the strict form and requires zero legacy SQL/MySQL runtime markers.
 
-## Final cutover checklist
+## Remaining deployment validation
 
-1. Finish converting every file reported by the MongoDB cutover audit.
-2. Run both migration scripts against a recent backup/staging copy.
-3. Compare critical record counts and spot-check balances, animals, quests, inventory, marriages, battle state, and guild settings.
-4. Smoke-test commands that create or mutate data, especially economy and battle commands.
-5. Run the strict cutover audit and the normal lint/circular-dependency checks.
-6. Remove the runtime MySQL initialization, SQL command parameters, MySQL dependency, and migration-only Redis dependency.
-7. Deploy against MongoDB Atlas/replica set, then remove the old database services only after verification.
+The code cutover is complete, but production migration is not considered finished until it has been validated against a real MongoDB replica-set deployment.
+
+1. Run the MySQL and Redis import scripts against a recent backup or staging copy of the old data.
+2. Compare critical collection counts and spot-check balances, animals, quests, inventories, marriages, battle teams, weapons and guild settings.
+3. Start the bot against MongoDB Atlas/replica set and verify startup/index creation with no legacy database services configured.
+4. Smoke-test read commands and mutation commands, especially Cowoncy transfers, daily/claim, hunt/HuntBot, zoo sell/sacrifice, inventory/trade, lootboxes, battle/team operations, rewards/events/giveaways and rankings.
+5. Exercise concurrent mutation paths to confirm transaction behavior under duplicate requests/shards.
+6. Once the real source data is imported and verified, remove migration-only MySQL/Redis packages and source migration credentials.
+7. Only after those checks should the migration PR be marked ready for merge and the old database services retired.
