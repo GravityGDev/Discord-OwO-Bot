@@ -77,7 +77,10 @@ exports.getReward = async function (id, uid, _con, rewardType, rewardId, rewardC
 					const counts = await mongo.collection('animal_count');
 					await counts.updateOne(
 						{ id },
-						{ $inc: { [animal.rank]: 1 }, $setOnInsert: { id } },
+						{
+							$inc: { [animal.rank]: 1, total: Number(animal.points || 0) },
+							$setOnInsert: { id },
+						},
 						{ upsert: true, ...opts(session) }
 					);
 				},
