@@ -10,6 +10,7 @@
 		"prettier:fix": "npx prettier --write .",
 		"format": "npm run lint:fix && npm run prettier:fix",
 		"checkCircular": "./node_modules/dpdm/lib/bin/dpdm.js --exit-code circular:1 ./src/owo.js",
+		"preflight:runtime": "node scripts/preflight-runtime.js",
 		"seed:mongo-static": "node scripts/seed-mongodb-static.js",
 		"migrate:mysql-to-mongo": "node scripts/migrate-mysql-to-mongodb.js",
 		"migrate:redis-to-mongo": "node scripts/migrate-redis-to-mongodb.js",
