@@ -29,16 +29,16 @@ class Command {
 		const containsPoints =
 			msg.content.toLowerCase().includes('owo') || msg.content.toLowerCase().includes('uwu');
 		if (!args) {
-			if (containsPoints) executeCommand(this.main, initParam(msg, 'points', [], this.main));
+			if (containsPoints) await executeCommand(this.main, initParam(msg, 'points', [], this.main));
 			return;
 		}
 		let command = args.shift().toLowerCase();
 		if (!commands[command]) {
-			if (containsPoints) executeCommand(this.main, initParam(msg, 'points', [], this.main));
+			if (containsPoints) await executeCommand(this.main, initParam(msg, 'points', [], this.main));
 			return;
 		}
 		if (!(await acceptedRules(this.main, msg))) {
-			executeCommand(this.main, initParam(msg, 'rule', [], this.main));
+			await executeCommand(this.main, initParam(msg, 'rule', [], this.main));
 			return;
 		}
 		let param = initParam(msg, command, args, this.main, context);
@@ -49,7 +49,7 @@ class Command {
 	async executeInteraction(interaction) {
 		let command = interaction.command.toLowerCase();
 		if (!(await acceptedRules(this.main, interaction))) {
-			executeCommand(this.main, initParam(interaction, 'rule', [], this.main));
+			await executeCommand(this.main, initParam(interaction, 'rule', [], this.main));
 			return;
 		}
 		let param = initParam(interaction, command, interaction.args, this.main);
@@ -65,26 +65,26 @@ class Command {
 		let param = initParam(msg, command, args, this.main, context);
 
 		if (commandObj.owner && msg.author.id === this.main.config.owner) {
-			adminCommands[command].execute(param);
+			await adminCommands[command].execute(param);
 			return true;
 		} else if (this.main.config.modChannels.includes(msg.channel.id)) {
 			if (
 				commandObj.admin &&
 				this.main.config.role.admin.find((id) => msg.member?.roles.includes(id))
 			) {
-				adminCommands[command].execute(param);
+				await adminCommands[command].execute(param);
 				return true;
 			} else if (
 				commandObj.manager &&
 				this.main.config.role.manager.find((id) => msg.member?.roles.includes(id))
 			) {
-				adminCommands[command].execute(param);
+				await adminCommands[command].execute(param);
 				return true;
 			} else if (
 				commandObj.helper &&
 				this.main.config.role.helper.find((id) => msg.member?.roles.includes(id))
 			) {
-				adminCommands[command].execute(param);
+				await adminCommands[command].execute(param);
 				return true;
 			}
 		}
