@@ -40,6 +40,12 @@ async function ensureIndexes(db) {
 		db.collection('redis_sets').createIndex({ expiresAt: 1 }, { expireAfterSeconds: 0 }),
 		db.collection('pubsub_events').createIndex({ createdAt: 1 }, { expireAfterSeconds: 300 }),
 		db.collection('rules').createIndex({ opinion: 1 }),
+		db.collection('user').createIndex({ id: 1 }, { unique: true }),
+		db.collection('user').createIndex({ uid: 1 }, { unique: true }),
+		db.collection('cowoncy').createIndex({ id: 1 }, { unique: true }),
+		db.collection('animal').createIndex({ id: 1, name: 1 }, { unique: true }),
+		db.collection('animal').createIndex({ pid: 1 }, { unique: true, sparse: true }),
+		db.collection('quest').createIndex({ uid: 1 }),
 	]);
 
 	indexesReady = true;
