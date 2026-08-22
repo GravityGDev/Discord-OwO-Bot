@@ -32,13 +32,12 @@ module.exports = new CommandInterface({
 
 	execute: function (p) {
 		if (p.args.length == 0) display(p);
-		else give(p, p.con, p.msg, p.args, p.global, p.send);
+		else give(p, p.msg, p.send);
 	},
 });
 
-async function give(p, con, msg, args, global, send) {
-	let user = undefined;
-	user = p.getMention(p.args[0]);
+async function give(p, msg, send) {
+	let user = p.getMention(p.args[0]);
 	if (!user) {
 		user = await p.fetch.getMember(p.msg.channel.guild, p.args[0]);
 		if (!user) {
@@ -52,13 +51,10 @@ async function give(p, con, msg, args, global, send) {
 		return;
 	}
 
-	let sql =
-		'SELECT user.uid,cookieTime FROM user LEFT JOIN timers ON user.uid = timers.uid WHERE id = ' +
-		p.msg.author.id +
-		';';
-	let result = await p.query(sql);
-
-	let afterMid = dateUtil.afterMidnight(result[0] ? result[0].cookieTime : undefined);
+	const uid = await p.global.getUid(p.msg.author.id);
+	const timers = await p.mongo.collection('timers');
+	let timer = await timers.findOne({ uid }, { projection: { cookieTime: 1 } });
+	let afterMid = dateUtil.afterMidnight(timer?.cookieTime);
 
 	if (afterMid && !afterMid.after) {
 		p.errorMsg(
@@ -74,21 +70,41 @@ async function give(p, con, msg, args, global, send) {
 		return;
 	}
 
-	sql =
-		'INSERT INTO rep (id,count) VALUES (' +
-		user.id +
-		',1) ON DUPLICATE KEY UPDATE count = count + 1;';
-	if (!result[0]) sql += 'INSERT IGNORE INTO user (id,count) VALUES (' + p.msg.author.id + ',0);';
-	sql +=
-		'INSERT INTO timers (uid,cookieTime) VALUES ((SELECT uid FROM user WHERE id = ' +
-		p.msg.author.id +
-		'),' +
-		afterMid.sql +
-		') ON DUPLICATE KEY UPDATE cookieTime = ' +
-		afterMid.sql +
-		';';
+	const session = await p.mongo.startSession();
+	try {
+		session.startTransaction();
+		timer = await timers.findOne({ uid }, { projection: { cookieTime: 1 }, session });
+		afterMid = dateUtil.afterMidnight(timer?.cookieTime);
+		if (afterMid && !afterMid.after) {
+			await session.abortTransaction();
+			p.errorMsg(
+				`, Nu! You need to wait **${afterMid.hours}H ${afterMid.minutes}M ${afterMid.seconds}S**`,
+				3000
+			);
+			return;
+		}
 
-	result = await p.query(sql);
+		const reps = await p.mongo.collection('rep');
+		await reps.updateOne(
+			{ id: String(user.id) },
+			{ $inc: { count: 1 }, $setOnInsert: { id: String(user.id) } },
+			{ upsert: true, session }
+		);
+		await timers.updateOne(
+			{ uid },
+			{ $set: { cookieTime: afterMid.now }, $setOnInsert: { uid } },
+			{ upsert: true, session }
+		);
+		await session.commitTransaction();
+	} catch (err) {
+		if (session.inTransaction()) await session.abortTransaction();
+		console.error(err);
+		p.errorMsg(', failed to send that cookie. Please try again later.', 3000);
+		return;
+	} finally {
+		await session.endSession();
+	}
+
 	let text =
 		'**<a:cookieeat:423020737364885525> | ' +
 		p.getTag(user) +
@@ -105,22 +121,21 @@ async function give(p, con, msg, args, global, send) {
 }
 
 async function display(p) {
-	let sql =
-		'SELECT cookieTime,rep.count FROM user LEFT JOIN timers ON user.uid = timers.uid LEFT JOIN rep ON user.id = rep.id WHERE user.id = ' +
-		p.msg.author.id +
-		';';
-	let result = await p.query(sql);
-	let afterMid = dateUtil.afterMidnight(result[0] ? result[0].cookieTime : undefined);
+	const uid = await p.global.getUid(p.msg.author.id);
+	const timers = await p.mongo.collection('timers');
+	const reps = await p.mongo.collection('rep');
+	const timer = await timers.findOne({ uid }, { projection: { cookieTime: 1 } });
+	const rep = await reps.findOne({ id: String(p.msg.author.id) }, { projection: { count: 1 } });
+	let afterMid = dateUtil.afterMidnight(timer?.cookieTime);
 
-	let count = 0;
-	if (result[0] && result[0].count) count = result[0].count;
+	let count = rep?.count || 0;
 	let again = 'You have one cookie to send!';
 	const opt = { count, from: p.msg.author };
 
 	if (afterMid && !afterMid.after) {
-		const timer = `${afterMid.hours}H ${afterMid.minutes}M ${afterMid.seconds}S`;
-		opt.timer = timer;
-		again = `You can send a cookie in **${timer}**!`;
+		const timerText = `${afterMid.hours}H ${afterMid.minutes}M ${afterMid.seconds}S`;
+		opt.timer = timerText;
+		again = `You can send a cookie in **${timerText}**!`;
 	} else {
 		opt.ready = true;
 	}
