@@ -184,16 +184,13 @@ module.exports = class BattleEvent {
 		await battleUtil.updateTT.bind(this.p)(this.player);
 		await battleUtil.updateTT.bind(this.p)(this.enemy);
 
-		let sql = `SELECT * FROM user INNER JOIN crate ON user.uid = crate.uid WHERE id = ${this.p.msg.author.id};`;
-		let result = await this.p.query(sql);
-		/* Decide if user receives a crate */
-		let crateQuery = result[0];
+		const uid = await this.p.global.getUid(this.p.msg.author.id);
+		const crates = await this.p.mongo.collection('crate');
+		const crateQuery = await crates.findOne({ uid, cratetype: 0 });
 		let crate = this.p.dateUtil.afterMidnight(crateQuery ? crateQuery.claim : undefined);
 		if (!crateQuery || crateQuery.claimcount < 3 || crate.after) {
-			crate = crateUtil.crateFromBattle(this.p, crateQuery, crate);
-			if (crate.sql) await this.p.query(crate.sql);
+			crate = await crateUtil.crateFromBattle(this.p, crateQuery, crate);
 		}
-		/* send message for crate reward */
 		if (crate && crate.text) await this.p.send(crate.text);
 
 		/* quests */
