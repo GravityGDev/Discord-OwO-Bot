@@ -27,13 +27,14 @@ jobs:
 
       - name: Apply pending weapon MongoDB cutover
         if: github.event_name == 'push'
-        run: node scripts/apply-weapon-mongo-cutover.js
+        run: python3 scripts/apply-weapon-mongo-cutover.py
 
       - name: Refresh package-lock.json
         run: npm install --package-lock-only --ignore-scripts
 
       - name: Syntax check MongoDB migration files
         run: |
+          python3 -m py_compile scripts/apply-weapon-mongo-cutover.py
           node --check src/utils/mongo.js
           node --check src/utils/mongoCounters.js
           node --check src/utils/mongoNumeric.js
@@ -57,7 +58,6 @@ jobs:
           node --check scripts/migrate-mysql-to-mongodb.js
           node --check scripts/migrate-redis-to-mongodb.js
           node --check scripts/audit-mongodb-cutover.js
-          node --check scripts/apply-weapon-mongo-cutover.js
 
       - name: Audit remaining SQL call sites
         run: node scripts/audit-mongodb-cutover.js
