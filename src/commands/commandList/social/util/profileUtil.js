@@ -13,11 +13,9 @@ const offsetID = 200;
 const settingEmoji = '⚙';
 
 var display = (exports.display = async function (p, user) {
-	/* Construct json for POST request */
 	let info = await generateJson(p, user);
 	info.password = process.env.GEN_PASS;
 
-	/* Returns a promise to avoid callback hell */
 	try {
 		return new Promise((resolve, _reject) => {
 			request(
@@ -38,7 +36,7 @@ var display = (exports.display = async function (p, user) {
 			);
 		});
 	} catch (err) {
-		console.err(err);
+		console.error(err);
 		return '';
 	}
 });
@@ -110,37 +108,30 @@ async function getRank(p, user) {
 }
 
 async function getCookie(p, user) {
-	let result = await p.query(`SELECT count FROM rep WHERE id = ${user.id};`);
-	if (!result || !result[0]) return { img: 'cookie.png', text: '+0' };
+	const reps = await p.mongo.collection('rep');
+	const result = await reps.findOne({ id: String(user.id) }, { projection: { count: 1 } });
+	if (!result) return { img: 'cookie.png', text: '+0' };
 
-	let count = result[0].count;
+	let count = result.count;
 	count = '+' + shortenInt(count);
 	return { img: 'cookie.png', text: count };
 }
 
 async function getMarriage(p, user) {
 	const uid = await p.global.getUid(user.id);
-	let sql = `SELECT
-			TIMESTAMPDIFF(DAY, marriedDate, NOW()) as days,
-			marriage.* 
-		FROM marriage 
-		WHERE uid1 = ${uid} OR uid2 = ${uid};`;
-	let result = await p.query(sql);
+	const marriages = await p.mongo.collection('marriage');
+	const users = await p.mongo.collection('user');
+	const result = await marriages.findOne({ $or: [{ uid1: uid }, { uid2: uid }] });
 
-	if (result.length < 1) return;
+	if (!result) return;
 
-	// Grab user and ring information
-	let ring = rings[result[0].rid];
-	let so = uid == result[0].uid1 ? result[0].uid2 : result[0].uid1;
-	sql = `SELECT id FROM user WHERE uid = ${so}`;
-	const result2 = await p.query(sql);
-	so = result2[0].id;
-	so = await p.fetch.getUser(so);
+	let ring = rings[result.rid];
+	let so = uid == result.uid1 ? result.uid2 : result.uid1;
+	const storedPartner = await users.findOne({ uid: so }, { projection: { id: 1 } });
+	so = storedPartner?.id ? await p.fetch.getUser(String(storedPartner.id)) : null;
 	let tag = '';
 	if (!so) so = 'Someone';
-	else {
-		so = p.getName(so);
-	}
+	else so = p.getName(so);
 	return { img: 'ring_' + ring.id + '.png', text: so, tag };
 }
 
@@ -159,57 +150,70 @@ function shortenInt(value) {
 }
 
 async function getTeam(p, user) {
-	let sql = `SELECT tname,name,xp
-		FROM pet_team
-			INNER JOIN pet_team_animal ON pet_team.pgid = pet_team_animal.pgid
-			INNER JOIN animal ON pet_team_animal.pid = animal.pid 
-		WHERE pet_team.pgid = (
-			SELECT pt2.pgid FROM user u2
-				INNER JOIN pet_team pt2
-					ON pt2.uid = u2.uid
-				LEFT JOIN pet_team_active pt_act
-					ON pt2.pgid = pt_act.pgid
-			WHERE u2.id = ${user.id}
-			ORDER BY pt_act.pgid DESC, pt2.pgid ASC
-			LIMIT 1)
-		ORDER BY pos DESC`;
-	let result = await p.query(sql);
-	if (!result || !result[0]) return;
+	const uid = await p.global.getUid(user.id);
+	const teams = await p.mongo.collection('pet_team');
+	const activeTeams = await p.mongo.collection('pet_team_active');
+	const teamAnimals = await p.mongo.collection('pet_team_animal');
+	const animalsCollection = await p.mongo.collection('animal');
+
+	const active = await activeTeams.findOne({ uid }, { projection: { pgid: 1 } });
+	let team = active?.pgid ? await teams.findOne({ uid, pgid: active.pgid }) : null;
+	if (!team) team = await teams.find({ uid }).sort({ pgid: 1 }).limit(1).next();
+	if (!team) return;
+
+	const slots = await teamAnimals.find({ pgid: team.pgid }).sort({ pos: -1 }).toArray();
+	if (!slots.length) return;
+	const pids = slots.map((slot) => slot.pid).filter((pid) => pid != null);
+	const animalRows = pids.length
+		? await animalsCollection.find({ pid: { $in: pids } }).toArray()
+		: [];
+	const byPid = new Map(animalRows.map((animal) => [animal.pid, animal]));
+
 	let animals = [];
-	for (let i in result) {
-		let animal = p.global.validAnimal(result[i].name);
+	for (let i in slots) {
+		const row = byPid.get(slots[i].pid);
+		if (!row) continue;
+		let animal = p.global.validAnimal(row.name);
 		if (animal) {
 			let animalID = animal.value.match(/:[0-9]+>/g);
 			if (animalID) animalID = animalID[0].match(/[0-9]+/g)[0];
 			else animalID = animal.value.substring(1, animal.value.length - 1);
 			if (animal.hidden) animalID = animal.hidden;
-			animals.push({ img: animalID, info: animalUtil.toLvl(result[i].xp) });
+			animals.push({ img: animalID, info: animalUtil.toLvl(row.xp) });
 		}
 	}
-	let name = result[0].tname;
+	let name = team.tname;
 	if (!name) name = 'My Team';
 	return { name, animals };
 }
 
 async function getBackground(p, user) {
-	let sql = `SELECT b.name_color,b.bid FROM user u INNER JOIN user_profile up ON u.uid = up.uid INNER JOIN backgrounds b ON up.bid = b.bid WHERE id = ${user.id};`;
-	let result = await p.query(sql);
-	if (!result[0]) return { id: 1 };
-	return { id: result[0].bid, color: result[0].name_color };
+	const users = await p.mongo.collection('user');
+	const profiles = await p.mongo.collection('user_profile');
+	const backgrounds = await p.mongo.collection('backgrounds');
+	const storedUser = await users.findOne({ id: String(user.id) }, { projection: { uid: 1 } });
+	if (!storedUser) return { id: 1 };
+	const profile = await profiles.findOne({ uid: storedUser.uid }, { projection: { bid: 1 } });
+	if (!profile?.bid) return { id: 1 };
+	const background = await backgrounds.findOne({ bid: profile.bid });
+	if (!background) return { id: 1 };
+	return { id: background.bid, color: background.name_color };
 }
 
 async function getInfo(p, user) {
-	let sql = `SELECT user_profile.* from user_profile INNER JOIN user ON user.uid = user_profile.uid WHERE user.id = ${user.id};`;
-	let result = await p.query(sql);
+	const users = await p.mongo.collection('user');
+	const profiles = await p.mongo.collection('user_profile');
+	const storedUser = await users.findOne({ id: String(user.id) }, { projection: { uid: 1 } });
+	const result = storedUser ? await profiles.findOne({ uid: storedUser.uid }) : null;
 	let info = {
 		about: "I'm just a plain human.",
 		title: 'An OwO Bot User',
 	};
-	if (result[0]) {
-		if (result[0].about) info.about = result[0].about;
-		if (result[0].accent) info.accent = result[0].accent;
-		if (result[0].accent2) info.accent2 = result[0].accent2;
-		if (result[0].title) info.title = result[0].title;
+	if (result) {
+		if (result.about) info.about = result.about;
+		if (result.accent) info.accent = result.accent;
+		if (result.accent2) info.accent2 = result.accent2;
+		if (result.title) info.title = result.title;
 	}
 	return info;
 }
@@ -231,13 +235,11 @@ var displayProfile = (exports.displayProfile = async function (p, user) {
 });
 
 exports.editBackground = async function (p) {
-	// Arg check
 	if (p.args.length < 3) {
 		p.errorMsg(', the correct command is `owo profile set wallpaper {wallpaperID}`', 3000);
 		return;
 	}
 
-	// parse bid
 	let bid = p.args[2];
 	if (!p.global.isInt(bid)) {
 		p.errorMsg(', the correct command is `owo profile set wallpaper {wallpaperID}`', 3000);
@@ -245,17 +247,18 @@ exports.editBackground = async function (p) {
 	}
 	bid = parseInt(bid) - offsetID;
 
-	// Check if user has bid
-	let sql = `SELECT u.uid,b.* FROM user u INNER JOIN user_backgrounds ub ON u.uid = ub.uid INNER JOIN backgrounds b ON ub.bid = b.bid WHERE u.id = ${p.msg.author.id} AND ub.bid = ${bid}`;
-	let result = await p.query(sql);
-	if (!result[0]) {
+	const uid = await getUid(p);
+	const owned = await p.mongo.collection('user_backgrounds');
+	const backgrounds = await p.mongo.collection('backgrounds');
+	const ownership = await owned.findOne({ uid, bid });
+	const background = ownership ? await backgrounds.findOne({ bid }) : null;
+	if (!background) {
 		p.errorMsg(", You don't have a wallpaper with this id! Please buy one from `owo shop`!", 3000);
 		return;
 	}
 
-	// Equip
-	sql = `INSERT INTO user_profile (uid,bid) VALUES (${result[0].uid},${result[0].bid}) ON DUPLICATE KEY UPDATE bid = ${result[0].bid};`;
-	await p.query(sql);
+	const profiles = await p.mongo.collection('user_profile');
+	await profiles.updateOne({ uid }, { $set: { bid: background.bid }, $setOnInsert: { uid } }, { upsert: true });
 	await displayProfile(p, p.msg.author);
 };
 
@@ -266,16 +269,14 @@ exports.editAbout = async function (p) {
 	}
 
 	let uid = await getUid(p);
-
 	if (!uid) {
 		p.errorMsg(', failed to change settings', 3000);
 		return;
 	}
 
 	let about = p.args.slice(2, p.args.length).join(' ');
-
-	let sql = `INSERT INTO user_profile (uid,about) VALUES (${uid},?) ON DUPLICATE KEY UPDATE about = ?;`;
-	await p.query(sql, [about, about]);
+	const profiles = await p.mongo.collection('user_profile');
+	await profiles.updateOne({ uid }, { $set: { about }, $setOnInsert: { uid } }, { upsert: true });
 	await displayProfile(p, p.msg.author);
 };
 
@@ -286,16 +287,14 @@ exports.editTitle = async function (p) {
 	}
 
 	let uid = await getUid(p);
-
 	if (!uid) {
 		p.errorMsg(', failed to change settings', 3000);
 		return;
 	}
 
 	let title = p.args.slice(2, p.args.length).join(' ');
-
-	let sql = `INSERT INTO user_profile (uid,title) VALUES (${uid},?) ON DUPLICATE KEY UPDATE title = ?;`;
-	await p.query(sql, [title, title]);
+	const profiles = await p.mongo.collection('user_profile');
+	await profiles.updateOne({ uid }, { $set: { title }, $setOnInsert: { uid } }, { upsert: true });
 	await displayProfile(p, p.msg.author);
 };
 
@@ -325,8 +324,8 @@ exports.editAccent = async function (p) {
 		p.errorMsg(', failed to change settings', 3000);
 		return;
 	}
-	let sql = `INSERT INTO user_profile (uid,accent) VALUES (${uid},?) ON DUPLICATE KEY UPDATE accent = ?;`;
-	await p.query(sql, [rgb, rgb]);
+	const profiles = await p.mongo.collection('user_profile');
+	await profiles.updateOne({ uid }, { $set: { accent: rgb }, $setOnInsert: { uid } }, { upsert: true });
 	await displayProfile(p, p.msg.author);
 };
 
@@ -356,8 +355,8 @@ exports.editAccent2 = async function (p) {
 		p.errorMsg(', failed to change settings', 3000);
 		return;
 	}
-	let sql = `INSERT INTO user_profile (uid,accent2) VALUES (${uid},?) ON DUPLICATE KEY UPDATE accent2 = ?;`;
-	await p.query(sql, [rgb, rgb]);
+	const profiles = await p.mongo.collection('user_profile');
+	await profiles.updateOne({ uid }, { $set: { accent2: rgb }, $setOnInsert: { uid } }, { upsert: true });
 	await displayProfile(p, p.msg.author);
 };
 
@@ -367,8 +366,8 @@ exports.setPublic = async function (p) {
 		p.errorMsg(', failed to change settings', 3000);
 		return;
 	}
-	let sql = `INSERT INTO user_profile (uid,private) VALUES (${uid},0) ON DUPLICATE KEY UPDATE private = 0;`;
-	await p.query(sql);
+	const profiles = await p.mongo.collection('user_profile');
+	await profiles.updateOne({ uid }, { $set: { private: 0 }, $setOnInsert: { uid } }, { upsert: true });
 
 	p.replyMsg(settingEmoji, ', Your profile can now be seen by anyone!');
 };
@@ -379,24 +378,14 @@ exports.setPrivate = async function (p) {
 		p.errorMsg(', failed to change settings', 3000);
 		return;
 	}
-	let sql = `INSERT INTO user_profile (uid,private) VALUES (${uid},1) ON DUPLICATE KEY UPDATE private = 1;`;
-	await p.query(sql);
+	const profiles = await p.mongo.collection('user_profile');
+	await profiles.updateOne({ uid }, { $set: { private: 1 }, $setOnInsert: { uid } }, { upsert: true });
 
 	p.replyMsg(settingEmoji, ', Your profile can **not** be seen by anyone!');
 };
 
 async function getUid(p) {
-	let sql = `SELECT uid FROM user WHERE id = ${p.msg.author.id};`;
-	let result = await p.query(sql);
-	let uid;
-	if (!result || !result[0]) {
-		sql = `INSERT IGNORE INTO user (id,count) VALUES (${p.msg.author.id},0);`;
-		result = await p.query(sql);
-		uid = result.insertId;
-	} else {
-		uid = result[0].uid;
-	}
-	return uid;
+	return p.global.getUid(p.msg.author.id);
 }
 
 function parseRGB(rgb) {
