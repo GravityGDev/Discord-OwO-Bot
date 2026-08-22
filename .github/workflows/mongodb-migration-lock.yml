@@ -68,6 +68,7 @@ jobs:
           node --check scripts/migrate-mysql-to-mongodb.js
           node --check scripts/migrate-redis-to-mongodb.js
           node --check scripts/audit-mongodb-cutover.js
+          node --check scripts/audit-owner-id.js
           node --check scripts/smoke-mongo-runtime.js
           node --check scripts/smoke-module-load.js
           node --check scripts/seed-mongodb-static.js
@@ -78,6 +79,9 @@ jobs:
 
       - name: Enforce MongoDB-only runtime
         run: node scripts/audit-mongodb-cutover.js --strict
+
+      - name: Enforce centralized owner Discord ID
+        run: node scripts/audit-owner-id.js
 
       - name: Commit lockfile when changed
         if: github.event_name == 'push'
