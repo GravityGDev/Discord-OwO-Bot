@@ -9,7 +9,6 @@ const mongo = require('./mongo.js');
 const counters = require('./mongoCounters.js');
 const global = require('./global.js');
 
-let installed = false;
 let counterSeeded = false;
 
 async function nextUwid() {
@@ -142,13 +141,3 @@ async function saveTakedownTracker() {
 exports.saveWeapon = saveWeapon;
 exports.updateWeapon = updateWeapon;
 exports.saveTakedownTracker = saveTakedownTracker;
-
-// Compatibility for already-loaded weapon classes during the migration.
-exports.install = function () {
-	if (installed) return;
-	const WeaponInterface = require('../commands/commandList/battle/WeaponInterface.js');
-	WeaponInterface.prototype.save = saveWeapon;
-	WeaponInterface.prototype.update = updateWeapon;
-	WeaponInterface.prototype.saveTT = saveTakedownTracker;
-	installed = true;
-};
