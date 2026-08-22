@@ -52,6 +52,32 @@ async function ensureIndexes(db) {
 		db.collection('disabled').createIndex({ channel: 1, command: 1 }, { unique: true }),
 		db.collection('timeout').createIndex({ id: 1 }),
 		db.collection('user_ban').createIndex({ id: 1, command: 1 }, { unique: true }),
+
+		// Battle/team/weapon access patterns.
+		db.collection('user_weapon').createIndex({ uid: 1, uwid: 1 }),
+		db.collection('user_weapon').createIndex({ uid: 1, avg: -1, pid: 1, favorite: 1 }),
+		db.collection('user_weapon').createIndex({ pid: 1 }),
+		db.collection('user_weapon_passive').createIndex({ uwid: 1, pcount: 1 }),
+		db.collection('user_weapon_kills').createIndex({ uwid: 1 }),
+		db.collection('pet_team').createIndex({ uid: 1, disabled: 1, pgid: 1 }),
+		db.collection('pet_team_active').createIndex({ uid: 1 }),
+		db.collection('pet_team_active').createIndex({ pgid: 1 }),
+		db.collection('pet_team_animal').createIndex({ pgid: 1, pos: 1 }),
+		db.collection('pet_team_animal').createIndex({ pid: 1 }),
+		db.collection('user_battle').createIndex({ uid: 1 }),
+		db.collection('battle_setting').createIndex({ uid: 1 }),
+		db.collection('crate').createIndex({ uid: 1, cratetype: 1 }),
+		db.collection('shards').createIndex({ uid: 1 }),
+
+		// Supporter/customization access patterns.
+		db.collection('patreons').createIndex({ uid: 1 }),
+		db.collection('patreon_wh').createIndex({ uid: 1, endDate: -1 }),
+		db.collection('patreon_discord').createIndex({ uid: 1 }),
+		db.collection('alter').createIndex({ uid: 1, command: 1, type: 1 }),
+		db.collection('alterbattle').createIndex({ uid: 1, type: 1 }),
+		db.collection('alterhunt').createIndex({ uid: 1, type: 1 }),
+		db.collection('pizza').createIndex({ uid: 1 }),
+		db.collection('icecream').createIndex({ uid: 1 }),
 	]);
 
 	indexesReady = true;
