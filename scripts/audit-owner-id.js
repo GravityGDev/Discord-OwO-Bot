@@ -3,7 +3,7 @@
 const fs = require('fs');
 const path = require('path');
 
-const LEGACY_OWNER_IDS = ['184587051943985152'];
+const LEGACY_PRIVILEGED_USER_IDS = ['184587051943985152', '460987842961866762'];
 const ROOTS = ['index.js', 'src', 'utils'];
 const ALLOWED_EXTENSIONS = new Set(['.js', '.json']);
 
@@ -27,9 +27,9 @@ const matches = [];
 for (const root of ROOTS) {
 	for (const file of collectFiles(path.resolve(process.cwd(), root))) {
 		const content = fs.readFileSync(file, 'utf8');
-		for (const id of LEGACY_OWNER_IDS) {
+		for (const id of LEGACY_PRIVILEGED_USER_IDS) {
 			if (content.includes(id)) {
-				matches.push(`${path.relative(process.cwd(), file)} contains legacy owner ID ${id}`);
+				matches.push(`${path.relative(process.cwd(), file)} contains legacy privileged user ID ${id}`);
 			}
 		}
 	}
@@ -47,4 +47,4 @@ if (matches.length) {
 }
 
 console.log(`[OwnerAudit] Runtime owner ID is centralized on config.owner (${config.owner}).`);
-console.log('[OwnerAudit] No legacy OwO owner Discord IDs remain in runtime files.');
+console.log('[OwnerAudit] No known legacy privileged Discord user IDs remain in runtime files.');
