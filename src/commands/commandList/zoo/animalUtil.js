@@ -41,22 +41,17 @@ function getRandomEventAnimal(event) {
 	let total = 0;
 	for (let i in event) {
 		total += event[i].rarity;
-		if (rand < total) {
-			return event[i].animal;
-		}
+		if (rand < total) return event[i].animal;
 	}
 }
 
 function getRandomRank(rarities) {
 	const totalRarity = Object.values(rarities).reduce((sum, val) => sum + val, 0);
 	const rand = Math.random() * totalRarity;
-
 	let total = 0;
 	for (let rank in rarities) {
 		total += rarities[rank];
-		if (rand < total) {
-			return rank;
-		}
+		if (rand < total) return rank;
 	}
 }
 
@@ -65,13 +60,8 @@ function getRarities(opts) {
 	const ranks = animals.getRanks();
 	for (let key in ranks) {
 		const rank = ranks[key];
-		if (!rank.conditional) {
-			rarity[key] = rank.rarity;
-		} else {
-			rarity[key] = 0;
-		}
+		rarity[key] = rank.conditional ? 0 : rank.rarity;
 	}
-
 	if (opts.patreon) {
 		const patreon = animals.getRank('patreon');
 		rarity[patreon.id] = patreon.rarity;
@@ -80,59 +70,41 @@ function getRarities(opts) {
 		rarity[cpatreon.id] = cpatreon.rarity;
 		rarity.common -= cpatreon.rarity;
 	}
-
 	if (opts.gem) {
 		const gem = animals.getRank('gem');
 		let gemRarity = gem.rarity;
-		if (opts.lucky) {
-			gemRarity *= opts.lucky.amount;
-		}
+		if (opts.lucky) gemRarity *= opts.lucky.amount;
 		rarity[gem.id] = gemRarity;
 		rarity.common -= gemRarity;
 	}
-
 	if (enableDistortedTier && opts.manual) {
 		const distorted = animals.getRank('distorted');
 		rarity[distorted.id] = distorted.rarity;
 		rarity.common -= distorted.rarity;
 	}
-
 	if (opts.huntbot) {
 		const bot = animals.getRank('bot');
 		rarity[bot.id] = opts.huntbot;
 		rarity.common -= opts.huntbot;
 	}
-
 	if (opts.event) {
 		let specialRarity = opts.event.reduce((sum, val) => sum + val.rarity, 0);
-		if (opts.special) {
-			specialRarity *= 2;
-		}
-		if (opts.huntbot) {
-			specialRarity /= 4;
-		}
+		if (opts.special) specialRarity *= 2;
+		if (opts.huntbot) specialRarity /= 4;
 		const special = animals.getRank('special');
 		rarity[special.id] = specialRarity;
 		rarity.common -= specialRarity;
 	}
-
 	return rarity;
 }
 
 function getEventAnimals() {
 	const event = eventUtil.getCurrentActive();
-	if (!event || !event.animals) {
-		return [];
-	}
-
+	if (!event || !event.animals) return [];
 	const eventAnimals = [];
 	event.animals.forEach((animal) => {
-		eventAnimals.push({
-			animal: animal.animal,
-			rarity: getEventRarity(animal, event),
-		});
+		eventAnimals.push({ animal: animal.animal, rarity: getEventRarity(animal, event) });
 	});
-
 	return eventAnimals;
 }
 
@@ -142,11 +114,7 @@ function getEventRarity(animal, event) {
 	const diff = end - start;
 	let rate = animal.minRate;
 	const now = Date.now();
-
-	if (end < now || now < start) {
-		return 0;
-	}
-
+	if (end < now || now < start) return 0;
 	const percentDiff = (now - start) / diff;
 	rate += (animal.maxRate - animal.minRate) * percentDiff;
 	return rate;
@@ -174,7 +142,6 @@ function generateMultipleAnimals(count, opt) {
 			};
 		}
 	}
-
 	const ordered = sortAnimals(total);
 	const typeCount = buildTypeCount(ordered);
 	return { animals: total, ordered, xp, typeCount };
@@ -192,9 +159,7 @@ exports.getMultipleAnimalsMongo = async function (count, user, opt) {
 
 exports.ensureAnimalBatch = ensureAnimalBatch;
 async function ensureAnimalBatch(id, ordered) {
-	for (const animal of ordered) {
-		await cacheUtil.insertAnimal(String(id), animal.value);
-	}
+	for (const animal of ordered) await cacheUtil.insertAnimal(String(id), animal.value);
 }
 
 exports.applyAnimalBatch = async function (id, ordered, typeCount, { session } = {}) {
@@ -209,14 +174,15 @@ exports.applyAnimalBatch = async function (id, ordered, typeCount, { session } =
 			{ $inc: { count: animal.count, totalcount: animal.count } },
 			options
 		);
-		if (!result.matchedCount) {
-			throw new Error(`Animal document missing after ensure: ${id}/${animal.value}`);
-		}
+		if (!result.matchedCount) throw new Error(`Animal document missing after ensure: ${id}/${animal.value}`);
 	}
 
-	const increments = {};
-	for (const row of typeCount) increments[row.rank] = row.count;
-	if (Object.keys(increments).length) {
+	const increments = { total: 0 };
+	for (const row of typeCount) {
+		increments[row.rank] = row.count;
+		increments.total += row.count * Number(animals.getRank(row.rank).points || 0);
+	}
+	if (typeCount.length) {
 		await countCollection.updateOne(
 			{ id },
 			{ $inc: increments, $setOnInsert: { id } },
@@ -253,7 +219,6 @@ exports.getPid = async function (id, pet) {
 	const userId = String(id);
 	const uid = await global.getUid(userId);
 	const animalCollection = await mongo.collection('animal');
-
 	if (global.isInt(pet) && parseInt(pet) < 10) {
 		const teams = await mongo.collection('pet_team');
 		const active = await mongo.collection('pet_team_active');
@@ -266,11 +231,7 @@ exports.getPid = async function (id, pet) {
 		const member = await memberships.findOne({ pgid, pos: parseInt(pet) });
 		return member?.pid;
 	}
-
-	const row = await animalCollection.findOne(
-		{ id: userId, name: pet.value },
-		{ projection: { pid: 1 } }
-	);
+	const row = await animalCollection.findOne({ id: userId, name: pet.value }, { projection: { pid: 1 } });
 	return row?.pid;
 };
 
