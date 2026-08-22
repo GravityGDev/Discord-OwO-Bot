@@ -8,8 +8,9 @@
 const CommandInterface = require('../../CommandInterface.js');
 
 const config = require('./../../../data/config.json');
+const ownerMention = `<@${config.owner}>`;
 const embed = {
-	content: 'This is an automated message. All responses should go to <@184587051943985152>.',
+	content: `This is an automated message. All responses should go to ${ownerMention}.`,
 	embed: {
 		color: config.embed_color,
 		timestamp: new Date(),
@@ -18,7 +19,7 @@ const embed = {
 			icon_url:
 				'https://cdn.discordapp.com/avatars/408785106942164992/7f7a07bfad0ad6a2faaaccd9421e5392.png?size=1024',
 		},
-		title: 'To redeem your pet, please DM **Scuttler#0001** with the info below!',
+		title: 'To redeem your pet, please DM the bot owner with the info below!',
 		description: 'I will need these information below!\n```\n',
 	},
 };
@@ -39,7 +40,7 @@ embed.embed.description +=
 embed.embed.description += ' - Once the pet is created, there is no refund.\n';
 embed.embed.description += '\nIf you have any questions, please feel free to ask!\n';
 embed.embed.description +=
-	'\n⚠️**__DO NOT REPLY TO THIS DM. ALL MESSAGES SHOULD GO TO <@184587051943985152>__**⚠️';
+	`\n⚠️**__DO NOT REPLY TO THIS DM. ALL MESSAGES SHOULD GO TO ${ownerMention}__**⚠️`;
 
 const embedString = JSON.stringify(embed);
 
