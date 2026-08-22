@@ -53,16 +53,31 @@ async function getActivePatreonUsers(p) {
 	return rows.map((row) => ({ id: String(row.id) }));
 }
 
+function displayPatreonUser(entry) {
+	const discord = entry.discord ? String(entry.discord) : 'Discord not linked';
+	const mention = entry.discord ? `<@${entry.discord}>` : 'No Discord account';
+	return `${mention} | **${entry.name || 'Hidden Patreon member'}** | ${discord}\n`;
+}
+
 async function getPatreons(p) {
+	const cookie = process.env.PATREON_COOKIE;
+	if (!cookie) {
+		await p.errorMsg(', PATREON_COOKIE is not configured in the private .env file.', 5000);
+		return;
+	}
+
 	let patreons;
 	try {
-		patreons = await patreon.request(p.args.join(' '));
+		patreons = await patreon.request(cookie);
 	} catch (err) {
 		console.error(err);
 		return;
 	}
+
+	const flags = new Set(p.args.map((arg) => String(arg).toLowerCase()));
+	const ignoreStoredPatreons = flags.has('ignoremongo') || flags.has('ignoresql');
 	let result = [];
-	if (p.args[0] != 'ignoresql') {
+	if (!ignoreStoredPatreons) {
 		result = await getActivePatreonUsers(p);
 	}
 
@@ -71,19 +86,13 @@ async function getPatreons(p) {
 	console.log('customized commands');
 	if (patreons.customizedCommand.length) {
 		text += '**Customized Command**\n';
-		let list = patreons.customizedCommand;
-		for (let i in list) {
-			text += '<@' + list[i].discord + '> | **' + list[i].name + '** | ' + list[i].discord + '\n';
-		}
+		for (const entry of patreons.customizedCommand) text += displayPatreonUser(entry);
 	}
 
 	console.log('custom commands');
 	if (patreons.customCommand.length) {
 		text += '\n**Custom Command**\n';
-		let list = patreons.customCommand;
-		for (let i in list) {
-			text += '<@' + list[i].discord + '> | **' + list[i].name + '** | ' + list[i].discord + '\n';
-		}
+		for (const entry of patreons.customCommand) text += displayPatreonUser(entry);
 	}
 
 	console.log('custom pet');
@@ -91,37 +100,40 @@ async function getPatreons(p) {
 		'Discord Name,Discord ID,Patreon Name,Pet Name,hp str pr wp mag mr,Pet Desc,Pet ID,MongoDB\n';
 	if (patreons.pet.length) {
 		text += '\n**Custom Pet**\n';
-		let list = patreons.pet;
-		for (let i in list) {
-			text += '<@' + list[i].discord + '> | **' + list[i].name + '** | ' + list[i].discord + '\n';
-			let user = await p.fetch.getUser(list[i].discord);
-			csv += (user ? user.username : 'A User') + ',' + list[i].discord + ',' + list[i].name + '\n';
+		for (const entry of patreons.pet) {
+			text += displayPatreonUser(entry);
+			let user;
+			if (entry.discord) user = await p.fetch.getUser(String(entry.discord));
+			csv +=
+				(user ? user.username : 'A User') +
+				',' +
+				(entry.discord || '') +
+				',' +
+				(entry.name || 'Hidden Patreon member') +
+				'\n';
 		}
 	}
 
 	console.log('monthly cowoncy');
 	cowoncy = [];
 	if (patreons.cowoncy.length) {
-		let list = patreons.cowoncy;
-		for (let i in list) {
-			if (list[i].discord && !cowoncy.includes(String(list[i].discord))) {
-				cowoncy.push(String(list[i].discord));
+		for (const entry of patreons.cowoncy) {
+			if (entry.discord && !cowoncy.includes(String(entry.discord))) {
+				cowoncy.push(String(entry.discord));
 			}
 		}
-		for (let i in result) {
-			if (!cowoncy.includes(String(result[i].id))) cowoncy.push(String(result[i].id));
-		}
+	}
+	for (const entry of result) {
+		if (!cowoncy.includes(String(entry.id))) cowoncy.push(String(entry.id));
 	}
 
 	console.log('done');
 
-	await p.send(text, null, null, { split: true });
+	if (text) await p.send(text, null, null, { split: true });
 	await p.send(
 		'Type `owo distributecowoncy {amount}` to send monthly cowoncy to ' +
-			patreons.cowoncy.length +
-			'+' +
-			result.length +
-			' users'
+			cowoncy.length +
+			' unique users'
 	);
 	await p.send('```' + csv + '```', null, null, {
 		split: { prepend: '```', append: '```' },
