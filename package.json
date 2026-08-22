@@ -3,6 +3,9 @@
 	"version": "1.0.0",
 	"description": "a discord bot!",
 	"main": "index.js",
+	"engines": {
+		"node": ">=24 <25"
+	},
 	"scripts": {
 		"start": "node index.js",
 		"start:checked": "npm run preflight:runtime && node index.js",
