@@ -20,7 +20,8 @@ class PubSub {
 
 		for (let listener in dir) this.channels[listener] = dir[listener];
 
-		this.init().catch((err) => {
+		this.ready = this.init();
+		this.ready.catch((err) => {
 			console.error('[MongoDB PubSub] Failed to initialize');
 			console.error(err);
 		});
@@ -30,9 +31,7 @@ class PubSub {
 		this.collection = await mongo.collection('pubsub_events');
 
 		try {
-			this.changeStream = this.collection.watch([
-				{ $match: { operationType: 'insert' } },
-			]);
+			this.changeStream = this.collection.watch([{ $match: { operationType: 'insert' } }]);
 			this.changeStream.on('change', (change) => this.handleDocument(change.fullDocument));
 			this.changeStream.on('error', (err) => {
 				console.error('[MongoDB PubSub] Change stream unavailable, using polling fallback');
@@ -80,6 +79,7 @@ class PubSub {
 	}
 
 	async publish(channel, message = true) {
+		await this.ready;
 		if (!this.collection) this.collection = await mongo.collection('pubsub_events');
 		if (typeof message === 'object') message = JSON.stringify(message);
 
@@ -89,6 +89,22 @@ class PubSub {
 			createdAt: new Date(),
 		});
 		return result.acknowledged ? 1 : 0;
+	}
+
+	async close() {
+		if (this.pollTimer) {
+			clearInterval(this.pollTimer);
+			this.pollTimer = null;
+		}
+		if (this.changeStream) {
+			try {
+				await this.changeStream.close();
+			} catch (err) {
+				console.error('[MongoDB PubSub] Failed to close change stream');
+				console.error(err);
+			}
+			this.changeStream = null;
+		}
 	}
 }
 
