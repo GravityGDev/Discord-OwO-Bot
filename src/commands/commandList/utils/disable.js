@@ -39,37 +39,69 @@ module.exports = new CommandInterface({
 		let commands = p.args.slice();
 		for (let i = 0; i < commands.length; i++) commands[i] = commands[i].toLowerCase();
 
+		const channel = String(p.msg.channel.id);
+		const disabled = await p.mongo.collection('disabled');
+
 		// If the user wants to disable all commands
 		if (commands.includes('all')) {
-			let list = '(' + p.msg.channel.id + ",'all'),";
+			const names = new Set(['all']);
 			for (let key in p.mcommands) {
-				if (key != 'disable' && key != 'enable')
-					list += '(' + p.msg.channel.id + ",'" + key + "'),";
+				if (key != 'disable' && key != 'enable') names.add(key);
 			}
 			for (let key in p.commandGroups) {
-				if (key != 'undefined') list += '(' + p.msg.channel.id + ",'" + key + "'),";
+				if (key != 'undefined') names.add(key);
 			}
-			list = list.slice(0, -1);
-			let sql = 'INSERT IGNORE INTO disabled (channel,command) VALUES ' + list + ';';
-			await p.query(sql);
+
+			await disabled.bulkWrite(
+				Array.from(names).map((command) => ({
+					updateOne: {
+						filter: { channel, command },
+						update: {
+							$setOnInsert: {
+								_id: `disabled:${encodeURIComponent(channel)}:${encodeURIComponent(command)}`,
+								channel,
+								command,
+							},
+						},
+						upsert: true,
+					},
+				})),
+				{ ordered: false }
+			);
+
 			p.send('**⚙ | All** commands have been **disabled** for this channel!');
 			return;
 		}
 
 		// Disable commands from parsed args
-		let sql = 'INSERT IGNORE INTO disabled (channel,command) VALUES ';
-		let validCommand = false;
+		const names = new Set();
 		for (let i = 0; i < commands.length; i++) {
 			/* Convert command name to proper name */
 			let command = p.aliasToCommand[commands[i]];
 			if (!command && p.commandGroups[commands[i]]) command = commands[i];
 			if (command && command != 'disabled' && command != 'enable' && command != 'undefined') {
-				validCommand = true;
-				sql += '(' + p.msg.channel.id + ",'" + command + "'),";
+				names.add(command);
 			}
 		}
-		sql = sql.slice(0, -1) + ';';
-		if (validCommand) await p.query(sql);
+
+		if (names.size) {
+			await disabled.bulkWrite(
+				Array.from(names).map((command) => ({
+					updateOne: {
+						filter: { channel, command },
+						update: {
+							$setOnInsert: {
+								_id: `disabled:${encodeURIComponent(channel)}:${encodeURIComponent(command)}`,
+								channel,
+								command,
+							},
+						},
+						upsert: true,
+					},
+				})),
+				{ ordered: false }
+			);
+		}
 
 		p.send(await enabledUtil.createEmbed(p));
 	},
