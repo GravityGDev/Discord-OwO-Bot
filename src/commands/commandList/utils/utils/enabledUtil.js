@@ -21,10 +21,8 @@ for (let i in emotes.uEmote) {
 }
 
 exports.createEmbed = async function (p) {
-	let sql = 'SELECT * FROM disabled WHERE channel = ' + p.msg.channel.id + ';';
-
-	/* Query */
-	let result = await p.query(sql);
+	const collection = await p.mongo.collection('disabled');
+	const result = await collection.find({ channel: String(p.msg.channel.id) }).toArray();
 
 	/* Construct message */
 	let disabled = {};
