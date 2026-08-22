@@ -6,7 +6,34 @@ Here are the codes for OwO Bot! Feel free to submit an issue or open a pull requ
 
 ## Self hosting
 
-This discord bot uses [MariaDB](https://mariadb.org/) and [Redis](https://redis.io/) for its databases. Some files may be missing due to security reasons and can be found [here](https://github.com/ChristopherBThai/Discord-OwO-Bot/tree/master/secret).
+This migration branch uses **MongoDB** for runtime persistence. Use MongoDB Atlas or another replica set because economy and other state-changing commands use multi-document transactions.
+
+Create a private runtime environment file from the template:
+
+```bash
+cp .env.example .env
+```
+
+At minimum configure:
+
+```text
+BOT_TOKEN=your_discord_bot_token
+MONGODB_URI=your_mongodb_atlas_or_replica_set_uri
+MONGODB_DB=owo
+```
+
+For a brand-new database, seed the bundled base reference data and run the deployment preflight before starting Discord:
+
+```bash
+npm install
+npm run seed:mongo-static
+npm run preflight:runtime
+npm run start:checked
+```
+
+The real `.env` file is gitignored and must not be committed. Optional integrations such as DBL reporting, legacy socket services, InfluxDB logging and the image-generation service can be left blank for the initial single-shard/debug deployment.
+
+If you are preserving data from an older MySQL/MariaDB + Redis installation, temporary source-database variables and migration commands are documented in [MONGODB_MIGRATION.md](./MONGODB_MIGRATION.md). MySQL and Redis are no longer runtime persistence requirements.
 
 ## License
 
