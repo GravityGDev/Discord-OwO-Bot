@@ -6,15 +6,17 @@ const root = path.resolve(__dirname, '..');
 const src = path.join(root, 'src');
 const strict = process.argv.includes('--strict');
 
+// Keep these patterns specific to the old persistence API. Generic words such as
+// "update" and MongoDB session.startTransaction() are not legacy dependencies.
 const patterns = [
-	{ name: 'legacy mysql import', regex: /require\([^\n]*mysql\.js['"]\)/g },
+	{ name: 'legacy mysql import', regex: /require\([^\n]*mysql(?:Handler)?\.js['"]\)/g },
 	{ name: 'legacy query helper', regex: /\bp\.query\s*\(/g },
-	{ name: 'legacy transaction helper', regex: /\bstartTransaction\s*\(/g },
+	{ name: 'legacy transaction helper', regex: /\b(?:p|this)\.startTransaction\s*\(/g },
 	{ name: 'legacy connection query', regex: /\bcon\.query\s*\(/g },
-	{ name: 'SQL SELECT', regex: /\bSELECT\b[^\n;]*/gi },
-	{ name: 'SQL INSERT', regex: /\bINSERT\s+(?:IGNORE\s+)?INTO\b[^\n;]*/gi },
-	{ name: 'SQL UPDATE', regex: /\bUPDATE\b[^\n;]*/gi },
-	{ name: 'SQL DELETE', regex: /\bDELETE\s+FROM\b[^\n;]*/gi },
+	{ name: 'SQL SELECT', regex: /\bSELECT\b[\s\S]{0,500}?\bFROM\b/gi },
+	{ name: 'SQL INSERT', regex: /\bINSERT\s+(?:IGNORE\s+)?INTO\s+[`\w]+/gi },
+	{ name: 'SQL UPDATE', regex: /\bUPDATE\s+[`\w]+(?:\s+(?:AS\s+)?\w+)?\s+SET\b/gi },
+	{ name: 'SQL DELETE', regex: /\bDELETE\s+FROM\s+[`\w]+/gi },
 ];
 
 const ignoredFiles = new Set([
