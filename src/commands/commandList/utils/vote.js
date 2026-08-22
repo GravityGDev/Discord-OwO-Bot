@@ -7,7 +7,9 @@
 
 const CommandInterface = require('../../CommandInterface.js');
 const patreonUtil = require('../patreon/utils/patreonUtil.js');
+const mongoNumeric = require('../../../utils/mongoNumeric.js');
 
+const legacyClaimDate = new Date('2017-01-01T00:00:00.000Z');
 const voteComponent = [
 	{
 		type: 1,
@@ -42,111 +44,138 @@ module.exports = new CommandInterface({
 	six: 500,
 
 	execute: async function (p) {
-		let id = p.msg.author.id;
-		const voted = await p.dbl.hasVoted('' + p.msg.author.id);
+		const id = String(p.msg.author.id);
+		const voted = await p.dbl.hasVoted(id);
 		if (!voted) {
 			let text = `**${p.config.emoji.check} | Your daily vote is available!**\n`;
 			text += '**<:blank:427371936482328596> |** You can vote every 12 hours!';
-			//text += "**⚠ |** Automatic votes are currently broken!\n";
-			//text += "**<:blank:427371936482328596> |** Please retype `owo vote` 1-10min after you vote!\n";
-			p.send({ content: text, components: voteComponent });
+			await p.send({ content: text, components: voteComponent });
 			return;
 		}
-		let weekend = await p.dbl.isWeekend();
-		let patreon = await patreonUtil.getSupporterRank(p, p.msg.author);
 
-		let sql = `SELECT count,TIMESTAMPDIFF(HOUR,date,NOW()) AS time FROM vote WHERE id = ${id};`;
-		let result = await this.query(sql);
+		const weekend = await p.dbl.isWeekend();
+		const supporter = await patreonUtil.getSupporterRank(p, p.msg.author);
+		const uid = await p.global.getUid(id);
+		const boxType = Math.random() < 0.5 ? 'lootbox' : 'crate';
+		const outcome = await claimVote(p, id, uid, supporter, weekend, boxType);
 
-		if (result[0] == undefined) {
-			let box = getRandomBox.bind(this)();
-			let reward = 100;
-			let patreonBonus = patreon.benefitRank >= 3 ? reward : 0;
-			let weekendBonus = weekend ? reward : 0;
-
-			sql =
-				`INSERT IGNORE INTO vote (id,date,count) VALUES (${id}, NOW(), 1);` +
-				`UPDATE IGNORE cowoncy SET money = money + ${
-					reward + patreonBonus + weekendBonus
-				} WHERE id = ${id};` +
-				box.sql;
-			await this.query(sql);
-
-			let text =
-				'**☑ |** You have received **' +
-				reward +
-				'** cowoncy for voting!' +
-				patreonMsg(patreonBonus) +
-				'\n';
-			if (weekend) {
-				text += `**${p.config.emoji.beach} |** It's the weekend! You also earned a bonus of **${weekendBonus}** cowoncy!\n`;
-			}
-			text += box.text;
-			p.send({ content: text, components: voteComponent });
-
-			p.logger.incr('votecount', 1, {}, p.msg);
-			p.logger.incr('cowoncy', reward + patreonBonus + weekendBonus, { type: 'vote' }, p.msg);
-		} else if (result[0].time >= 12) {
-			let box = getRandomBox.bind(this)();
-			let bonus = 100 + result[0].count * 3;
-			let patreonBonus = 0;
-			let weekendBonus = weekend ? bonus : 0;
-			if (patreon) patreonBonus = bonus;
-
-			sql =
-				`UPDATE vote SET date = NOW(),count = count+1 WHERE id = ${id};` +
-				`UPDATE IGNORE cowoncy SET money = money + ${
-					bonus + patreonBonus + weekendBonus
-				} WHERE id = ${id};` +
-				box.sql;
-			await this.query(sql);
-
-			let text = `**${
-				p.config.emoji.check
-			} |** You have received **${bonus}** cowoncy for voting!${patreonMsg(patreonBonus)}\n`;
-			if (weekend) {
-				text += `**${p.config.emoji.beach} |** It's the weekend! You also earned a bonus of **${weekendBonus}** cowoncy!\n`;
-			}
-			text += box.text;
-			p.send({ content: text, components: voteComponent });
-
-			p.logger.incr('votecount', 1, {}, p.msg);
-			p.logger.incr('cowoncy', bonus + patreonBonus + weekendBonus, { type: 'vote' }, p.msg);
-		} else {
+		if (outcome.error) {
+			p.errorMsg(', there was an error claiming your vote reward. Please try again later.', 3000);
+			return;
+		}
+		if (!outcome.claimed) {
 			let text = `**${p.config.emoji.check} |** Click the link to vote and gain 100+ cowoncy!\n`;
 			text += '**<:blank:427371936482328596> |** You can vote every 12 hours!\n';
-			text +=
-				'**<:blank:427371936482328596> |** Your daily vote is available in **' +
-				(12 - result[0].time) +
-				' H**\n';
-			p.send({ content: text, components: voteComponent });
+			text += `**<:blank:427371936482328596> |** Your daily vote is available in **${outcome.hoursLeft} H**\n`;
+			await p.send({ content: text, components: voteComponent });
+			return;
 		}
+
+		let text = `**${p.config.emoji.check} |** You have received **${outcome.baseReward}** cowoncy for voting!${patreonMsg(
+			outcome.patreonBonus
+		)}\n`;
+		if (weekend) {
+			text += `**${p.config.emoji.beach} |** It's the weekend! You also earned a bonus of **${outcome.weekendBonus}** cowoncy!\n`;
+		}
+		text +=
+			boxType === 'lootbox'
+				? '**<:box:427352600476647425> |** You received a lootbox!\n'
+				: '**<:crate:523771259302182922> |** You received a weapon crate!\n';
+		await p.send({ content: text, components: voteComponent });
+
+		p.logger.incr('votecount', 1, {}, p.msg);
+		p.logger.incr('cowoncy', outcome.totalReward, { type: 'vote' }, p.msg);
 	},
 });
 
-function patreonMsg(amount) {
-	if (!amount || amount == 0) return '';
-	return (
-		'\n**<:blank:427371936482328596> |** And **' +
-		amount +
-		'** cowoncy for being a <:patreon:449705754522419222> Patreon!'
+async function claimVote(p, id, uid, supporter, weekend, boxType) {
+	const votes = await p.mongo.collection('vote');
+	const cowoncy = await p.mongo.collection('cowoncy');
+	const lootbox = await p.mongo.collection('lootbox');
+	const crate = await p.mongo.collection('crate');
+	const session = await p.mongo.startSession();
+	let outcome;
+
+	try {
+		await session.withTransaction(async () => {
+			outcome = undefined;
+			const row = await votes.findOne({ id }, { session });
+			const now = new Date();
+			if (row?.date) {
+				const elapsed = now.getTime() - new Date(row.date).getTime();
+				if (elapsed < 12 * 60 * 60 * 1000) {
+					outcome = {
+						claimed: false,
+						hoursLeft: Math.max(1, Math.ceil((12 * 60 * 60 * 1000 - elapsed) / 3600000)),
+					};
+					return;
+				}
+			}
+
+			const previousCount = Number(row?.count || 0);
+			const baseReward = row ? 100 + previousCount * 3 : 100;
+			const patreonBonus = supporter?.benefitRank >= 3 ? baseReward : 0;
+			const weekendBonus = weekend ? baseReward : 0;
+			const totalReward = baseReward + patreonBonus + weekendBonus;
+
+			await votes.updateOne(
+				{ id },
+				{
+					$set: { id, date: now },
+					$inc: { count: 1 },
+				},
+				{ upsert: true, session }
+			);
+			await mongoNumeric.add(
+				cowoncy,
+				{ id },
+				'money',
+				totalReward,
+				{ upsert: true, session },
+				{ id }
+			);
+			await grantVoteBox(lootbox, crate, id, uid, boxType, session);
+
+			outcome = {
+				claimed: true,
+				baseReward,
+				patreonBonus,
+				weekendBonus,
+				totalReward,
+			};
+		});
+	} catch (err) {
+		console.error(err);
+		return { error: true };
+	} finally {
+		await session.endSession();
+	}
+	return outcome || { error: true };
+}
+
+async function grantVoteBox(lootbox, crate, id, uid, type, session) {
+	if (type === 'lootbox') {
+		await lootbox.updateOne(
+			{ id },
+			{
+				$inc: { boxcount: 1 },
+				$setOnInsert: { id, claimcount: 0, claim: legacyClaimDate, fbox: 0 },
+			},
+			{ upsert: true, session }
+		);
+		return;
+	}
+	await crate.updateOne(
+		{ uid, cratetype: 0 },
+		{
+			$inc: { boxcount: 1 },
+			$setOnInsert: { uid, cratetype: 0, claimcount: 0, claim: legacyClaimDate },
+		},
+		{ upsert: true, session }
 	);
 }
 
-function getRandomBox() {
-	let box = {};
-	if (Math.random() < 0.5) {
-		box.sql =
-			'INSERT INTO lootbox(id,boxcount,claimcount,claim) VALUES (' +
-			this.msg.author.id +
-			",1,0,'2017-01-01') ON DUPLICATE KEY UPDATE boxcount = boxcount + 1;";
-		box.text = '**<:box:427352600476647425> |** You received a lootbox!\n';
-	} else {
-		box.sql =
-			'INSERT INTO crate(uid,cratetype,boxcount,claimcount,claim) VALUES ((SELECT uid FROM user WHERE id = ' +
-			this.msg.author.id +
-			"),0,1,0,'2017-01-01') ON DUPLICATE KEY UPDATE boxcount = boxcount + 1;";
-		box.text = '**<:crate:523771259302182922> |** You received a weapon crate!\n';
-	}
-	return box;
+function patreonMsg(amount) {
+	if (!amount) return '';
+	return `\n**<:blank:427371936482328596> |** And **${amount}** cowoncy for being a <:patreon:449705754522419222> Patreon!`;
 }
