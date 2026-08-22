@@ -126,33 +126,6 @@ async function randCard(deck, type) {
 	return { card: card, type: type };
 }
 
-exports.generateSQL = generateSQL;
-function generateSQL(hand, dealer, id) {
-	id = '(SELECT bjid FROM blackjack WHERE id = ' + id + ')';
-	let sql = '';
-	for (let i = 0; i < hand.length; i++)
-		sql +=
-			'INSERT INTO blackjack_card (bjid,card,dealer,sort) VALUES (' +
-			id +
-			',' +
-			hand[i].card +
-			',0,' +
-			(i + 1) +
-			') ON DUPLICATE KEY UPDATE dealer = 0,sort= ' +
-			(i + 1) +
-			';';
-	for (let i = 0; i < dealer.length; i++)
-		sql +=
-			'INSERT INTO blackjack_card (bjid,card,dealer) VALUES (' +
-			id +
-			',' +
-			dealer[i].card +
-			',' +
-			(dealer.length - i) +
-			') ON DUPLICATE KEY UPDATE dealer = 2,sort=0;';
-	return sql;
-}
-
 exports.initDeck = initDeck;
 function initDeck(deck, player, dealer) {
 	for (let i = 0; i < player.length; i++) deck.splice(deck.indexOf(player[i].card), 1);
