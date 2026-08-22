@@ -68,6 +68,8 @@ jobs:
           node --check scripts/migrate-redis-to-mongodb.js
           node --check scripts/audit-mongodb-cutover.js
           node --check scripts/smoke-mongo-runtime.js
+          node --check scripts/seed-mongodb-static.js
+          node --check scripts/preflight-runtime.js
 
       - name: Check circular dependencies
         run: npx -p dpdm@3.13.1 dpdm --exit-code circular:1 ./src/owo.js
@@ -119,7 +121,7 @@ jobs:
           node-version: 15.14.0
 
       - name: Install isolated MongoDB driver dependencies
-        run: npm install --prefix /tmp/owo-mongo-deps --ignore-scripts --no-audit --no-fund mongodb@5.9.2
+        run: npm install --prefix /tmp/owo-mongo-deps --ignore-scripts --no-audit --no-fund mongodb@5.9.2 dotenv@10.0.0
 
       - name: Start MongoDB replica set
         shell: bash
@@ -154,6 +156,14 @@ jobs:
             exit 1
           fi
 
+      - name: Seed base MongoDB reference data
+        env:
+          NODE_PATH: /tmp/owo-mongo-deps/node_modules
+          MONGODB_URI: mongodb://127.0.0.1:27017/owo_smoke?replicaSet=rs0
+          MONGODB_DB: owo_smoke
+          MONGODB_SERVER_SELECTION_TIMEOUT: 10000
+        run: node scripts/seed-mongodb-static.js
+
       - name: Exercise runtime MongoDB transactions and exact arithmetic
         env:
           NODE_PATH: /tmp/owo-mongo-deps/node_modules
@@ -161,6 +171,15 @@ jobs:
           MONGODB_DB: owo_smoke
           MONGODB_SERVER_SELECTION_TIMEOUT: 10000
         run: node scripts/smoke-mongo-runtime.js
+
+      - name: Run deployment preflight against replica set
+        env:
+          NODE_PATH: /tmp/owo-mongo-deps/node_modules
+          BOT_TOKEN: ci-placeholder-token
+          MONGODB_URI: mongodb://127.0.0.1:27017/owo_smoke?replicaSet=rs0
+          MONGODB_DB: owo_smoke
+          MONGODB_SERVER_SELECTION_TIMEOUT: 10000
+        run: node scripts/preflight-runtime.js
 
       - name: Show MongoDB logs on failure
         if: failure()
