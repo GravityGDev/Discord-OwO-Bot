@@ -54,13 +54,14 @@ module.exports = new CommandInterface({
 		} else if (p.options.count) {
 			await openCrate(p, parseInt(p.options.count));
 		} else if (p.args.length > 0 && p.args[0].toLowerCase() == 'all') {
-			let sql = `SELECT boxcount FROM crate INNER JOIN user ON crate.uid = user.uid WHERE id = ${p.msg.author.id};`;
-			let result = await p.query(sql);
-			if (!result[0] || result[0].boxcount <= 0) {
+			const uid = await p.global.getUid(p.msg.author.id);
+			const crates = await p.mongo.collection('crate');
+			const result = await crates.findOne({ uid, cratetype: 0 });
+			if (!result || result.boxcount <= 0) {
 				p.errorMsg(", you don't have any more weapon crates!");
 				return;
 			}
-			let boxcount = result[0].boxcount;
+			let boxcount = result.boxcount;
 			if (boxcount > maxBoxes) boxcount = maxBoxes;
 			await openCrate(p, boxcount);
 		} else {
@@ -78,11 +79,14 @@ async function openCrate(p, count = 1) {
 		count = maxBoxes;
 	}
 
-	/* Decrement crate count */
-	let sql = `UPDATE crate INNER JOIN user ON crate.uid = user.uid SET crate.boxcount = crate.boxcount - ${count} WHERE user.id = ${p.msg.author.id} AND boxcount >= ${count};`;
-	let result = await p.query(sql);
+	const uid = await p.global.getUid(p.msg.author.id);
+	const crates = await p.mongo.collection('crate');
+	const result = await crates.updateOne(
+		{ uid, cratetype: 0, boxcount: { $gte: count } },
+		{ $inc: { boxcount: -count } }
+	);
 
-	if (!result.changedRows) {
+	if (!result.modifiedCount) {
 		p.errorMsg(", You don't have any weapon crates!", 3000);
 		return;
 	}
@@ -99,7 +103,6 @@ async function openCrate(p, count = 1) {
 		}
 	}
 
-	/* Construct text */
 	let text1, text2;
 	if (count == 1) {
 		let weapon = weaponsList[0];
@@ -155,7 +158,6 @@ async function openCrate(p, count = 1) {
 			allWeaponEmojis;
 	}
 
-	/* Send and edit message */
 	let message = await p.send(text1);
 	setTimeout(function () {
 		message.edit(text2);
