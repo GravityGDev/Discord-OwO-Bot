@@ -28,10 +28,13 @@ module.exports = new CommandInterface({
 	six: 500,
 
 	execute: async function () {
-		const sql = `SELECT money FROM cowoncy WHERE id = ${this.msg.author.id};`;
-		const result = await this.query(sql);
+		const cowoncy = await this.mongo.collection('cowoncy');
+		const account = await cowoncy.findOne(
+			{ id: String(this.msg.author.id) },
+			{ projection: { money: 1 } }
+		);
 
-		const money = result[0] ? this.global.toFancyNum(result[0].money) : '0';
+		const money = account ? this.global.toFancyNum(account.money) : '0';
 		let text = `${
 			this.config.emoji.cowoncy
 		} **| ${this.getName()}**, you currently have **__${money}__ cowoncy!**`;
