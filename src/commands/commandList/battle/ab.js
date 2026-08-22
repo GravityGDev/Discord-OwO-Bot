@@ -31,51 +31,56 @@ module.exports = new CommandInterface({
 	execute: async function (p) {
 		const author = p.opt?.member || p.opt?.author || p.msg.member || p.msg.author;
 		const uid = await p.global.getUid(author.id);
-		let sql = `SELECT (SELECT id FROM user WHERE uid = sender) AS sender,bet,flags,channel
-			FROM user_battle
-			WHERE
-				TIMESTAMPDIFF(MINUTE,time,NOW()) < 10 AND (
-					user1 = ${uid} OR
-					user2 = ${uid}
-				) AND (
-					sender != ${uid} OR
-					user1 = user2
-				);`;
-		sql += `UPDATE user_battle 
-			SET time = '2018-01-01' WHERE
-			TIMESTAMPDIFF(MINUTE,time,NOW()) < 10 AND (
-				user1 = ${uid} OR
-				user2 = ${uid}
-			);`;
-		let result = await p.query(sql);
+		const battles = await p.mongo.collection('user_battle');
+		const cutoff = new Date(Date.now() - 10 * 60 * 1000);
+		const battle = await battles.findOne({
+			time: { $gt: cutoff },
+			$and: [
+				{ $or: [{ user1: uid }, { user2: uid }] },
+				{ $or: [{ sender: { $ne: uid } }, { $expr: { $eq: ['$user1', '$user2'] } }] },
+			],
+		});
 
-		if (!result[0][0] || result[1].changedRows == 0) {
+		if (!battle) {
 			p.errorMsg(', You do not have any pending battles!', 3000);
 			return;
 		}
 
-		if (result[0][0].channel != p.msg.channel.id) {
+		if (String(battle.channel) != String(p.msg.channel.id)) {
 			p.errorMsg(', You can only accept battle requests from the same channel!', 3000);
 			return;
 		}
 
-		/* Parse flags */
-		let flags = result[0][0].flags.split(',');
+		const claimed = await battles.updateOne(
+			{ _id: battle._id, time: { $gt: cutoff } },
+			{ $set: { time: new Date('2018-01-01T00:00:00.000Z') } }
+		);
+		if (!claimed.modifiedCount) {
+			p.errorMsg(', You do not have any pending battles!', 3000);
+			return;
+		}
+
+		let flags = String(battle.flags || '').split(',');
 		flags = parseFlags(flags);
 
-		/* Get opponent name */
-		let sender = result[0][0].sender;
+		const users = await p.mongo.collection('user');
+		const senderRecord = await users.findOne({ uid: battle.sender }, { projection: { id: 1 } });
+		if (!senderRecord?.id) {
+			p.errorMsg(', I could not find your opponent!', 3000);
+			return;
+		}
+
+		let sender;
 		if (p.msg.channel.guild) {
-			sender = await p.fetch.getMember(p.msg.channel.guild.id, sender);
+			sender = await p.fetch.getMember(p.msg.channel.guild.id, String(senderRecord.id));
 		} else {
-			sender = await p.fetch.getUser(sender);
+			sender = await p.fetch.getUser(String(senderRecord.id));
 		}
 		if (!sender) {
 			p.errorMsg(', I could not find your opponent!', 3000);
 			return;
 		}
 		if (!p.msg.channel.guild) {
-			// Can't seem to edit message after interaction in DMs
 			flags.instant = true;
 		}
 
@@ -112,9 +117,9 @@ module.exports = new CommandInterface({
 			else winColumn = 'win2';
 		}
 
-		/* distribute the winning cowoncy */
-		let winSql = `UPDATE user_battle SET ${winColumn} = ${winColumn} + 1 WHERE user1 = (SELECT uid FROM user WHERE id = ${user1}) AND user2 = (SELECT uid FROM user WHERE id = ${user2});`;
-		await p.query(winSql);
+		const uid1 = await p.global.getUid(user1);
+		const uid2 = await p.global.getUid(user2);
+		await battles.updateOne({ user1: uid1, user2: uid2 }, { $inc: { [winColumn]: 1 } });
 
 		if (sender && sender.id != author.id) {
 			p.quest('friendlyBattle', 1, author);
@@ -131,7 +136,7 @@ function parseFlags(flags) {
 		let flag = flags[i];
 		if (flag == 'link') {
 			result.link = true;
-			result.log = true; // lazy force instant
+			result.log = true;
 		} else if (flag == 'log') {
 			result.log = true;
 		} else if (flag == 'compact' || flag == 'image' || flag == 'text') {
