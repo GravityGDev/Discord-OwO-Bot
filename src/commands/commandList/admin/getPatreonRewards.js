@@ -6,7 +6,7 @@
  */
 
 const CommandInterface = require('../../CommandInterface.js');
-
+const mongoNumeric = require('../../../utils/mongoNumeric.js');
 const patreon = require('../../../botHandlers/patreonHandler.js');
 var cowoncy = [
 	'184587051943985152',
@@ -33,6 +33,26 @@ module.exports = new CommandInterface({
 	},
 });
 
+function isActivePatreon(row) {
+	if (!row?.patreonTimer || !row?.patreonMonths) return false;
+	const expires = new Date(row.patreonTimer);
+	expires.setMonth(expires.getMonth() + Number(row.patreonMonths));
+	return expires > new Date();
+}
+
+async function getActivePatreonUsers(p) {
+	const patreonsCollection = await p.mongo.collection('patreons');
+	const active = (await patreonsCollection.find({ patreonMonths: { $gt: 0 } }).toArray()).filter(
+		isActivePatreon
+	);
+	if (!active.length) return [];
+
+	const uids = active.map((row) => row.uid);
+	const users = await p.mongo.collection('user');
+	const rows = await users.find({ uid: { $in: uids } }, { projection: { id: 1 } }).toArray();
+	return rows.map((row) => ({ id: String(row.id) }));
+}
+
 async function getPatreons(p) {
 	let patreons;
 	try {
@@ -43,9 +63,7 @@ async function getPatreons(p) {
 	}
 	let result = [];
 	if (p.args[0] != 'ignoresql') {
-		let sql =
-			'SELECT id FROM user INNER JOIN patreons ON user.uid = patreons.uid WHERE TIMESTAMPDIFF(MONTH,patreonTimer,NOW())<patreonMonths;';
-		result = await p.query(sql);
+		result = await getActivePatreonUsers(p);
 	}
 
 	let text = '';
@@ -70,7 +88,7 @@ async function getPatreons(p) {
 
 	console.log('custom pet');
 	let csv =
-		'Discord Name,Discord ID,Patreon Name,Pet Name,hp str pr wp mag mr,Pet Desc,Pet ID,SQL\n';
+		'Discord Name,Discord ID,Patreon Name,Pet Name,hp str pr wp mag mr,Pet Desc,Pet ID,MongoDB\n';
 	if (patreons.pet.length) {
 		text += '\n**Custom Pet**\n';
 		let list = patreons.pet;
@@ -86,10 +104,12 @@ async function getPatreons(p) {
 	if (patreons.cowoncy.length) {
 		let list = patreons.cowoncy;
 		for (let i in list) {
-			if (list[i].discord) cowoncy.push(list[i].discord);
+			if (list[i].discord && !cowoncy.includes(String(list[i].discord))) {
+				cowoncy.push(String(list[i].discord));
+			}
 		}
 		for (let i in result) {
-			if (!cowoncy.includes(result[i].id)) cowoncy.push(result[i].id);
+			if (!cowoncy.includes(String(result[i].id))) cowoncy.push(String(result[i].id));
 		}
 	}
 
@@ -113,18 +133,28 @@ async function distributeCowoncy(p) {
 		p.errorMsg(', Invalid param', 4000);
 		return;
 	}
-	let amount = parseInt(p.args[0]);
-	let sql = `INSERT IGNORE INTO cowoncy (id,money) VALUES (${cowoncy.join(
-		',' + amount + '),('
-	)},${amount}) ON DUPLICATE KEY UPDATE money = money + ${amount};`;
-	let result = await p.query(sql);
+	const amount = parseInt(p.args[0]);
+	const balances = await p.mongo.collection('cowoncy');
+	let modified = 0;
+	for (const id of [...new Set(cowoncy.map(String))]) {
+		const result = await mongoNumeric.add(
+			balances,
+			{ id },
+			'money',
+			amount,
+			{ upsert: true },
+			{ id }
+		);
+		modified += result.modifiedCount || result.upsertedCount || 0;
+	}
+
 	let text =
 		'Distributed ' +
 		amount +
 		' cowoncy to ' +
 		cowoncy.length +
 		' users\n```json\n' +
-		JSON.stringify(result, null, 2) +
+		JSON.stringify({ recipients: cowoncy.length, modified }, null, 2) +
 		'```';
 	p.send(text);
 }
