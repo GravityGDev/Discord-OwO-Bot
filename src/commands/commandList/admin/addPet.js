@@ -6,6 +6,7 @@
  */
 
 const CommandInterface = require('../../CommandInterface.js');
+const mongoCounters = require('../../../utils/mongoCounters.js');
 
 module.exports = new CommandInterface({
 	alias: ['addpet'],
@@ -24,8 +25,24 @@ module.exports = new CommandInterface({
 			return this.errorMsg(', Invalid user id');
 		}
 
-		const sql = `INSERT INTO animal (id, name, count, totalcount) VALUES (?, ?, 1, 1);`;
-		const result = await this.query(sql, [id, animal.value]);
-		this.send(`\`\`\`\n${JSON.stringify(result, null, 2)}\n\`\`\``);
+		const animals = await this.mongo.collection('animal');
+		if (await animals.findOne({ id: String(id), name: animal.value })) {
+			return this.errorMsg(', That user already owns this animal');
+		}
+		const pid = await mongoCounters.next('animal_pid');
+		const result = await animals.insertOne({
+			id: String(id),
+			name: animal.value,
+			pid,
+			count: 1,
+			totalcount: 1,
+			xp: 0,
+			ispet: 0,
+			nickname: null,
+			offensive: 0,
+			sellcount: 0,
+			saccount: 0,
+		});
+		this.send(`\`\`\`\n${JSON.stringify({ acknowledged: result.acknowledged, pid }, null, 2)}\n\`\`\``);
 	},
 });
