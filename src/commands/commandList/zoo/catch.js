@@ -6,16 +6,18 @@
  */
 
 const CommandInterface = require('../../CommandInterface.js');
-
 const global = require('../../../utils/global.js');
 const dateUtil = require('../../../utils/dateUtil.js');
+const mongoNumeric = require('../../../utils/mongoNumeric.js');
 const gemUtil = require('./gemUtil.js');
 const animalUtil = require('./animalUtil.js');
 const alterHunt = require('./../patreon/alterHunt.js');
 const patreonUtil = require('./../patreon/utils/patreonUtil.js');
 const teamUtil = require('../battle/util/teamUtil.js');
+
 const lootboxChance = 0.05;
 const rollPrice = 5;
+const legacyClaimDate = new Date('2017-01-01T00:00:00.000Z');
 
 module.exports = new CommandInterface({
 	alias: ['hunt', 'h', 'catch'],
@@ -34,11 +36,11 @@ module.exports = new CommandInterface({
 
 	appCommands: [
 		{
-			'name': 'hunt',
-			'type': 1,
-			'description': 'Hunt for some animals!',
-			'integration_types': [0, 1],
-			'contexts': [0],
+			name: 'hunt',
+			type: 1,
+			description: 'Hunt for some animals!',
+			integration_types: [0, 1],
+			contexts: [0],
 		},
 	],
 
@@ -48,264 +50,268 @@ module.exports = new CommandInterface({
 	bot: true,
 
 	execute: async function (p) {
-		let msg = p.msg;
+		const id = String(p.msg.author.id);
+		const uid = await p.global.getUid(id);
+		const gemRows = await getActiveGemRows(p, uid);
+		const gems = parseActiveGems(gemRows);
+		const team = await getActiveTeamInfo(p, uid);
+		const animal = await getAnimals(p, gems);
+		const lootboxRoll = Math.random();
 
-		let sql = `SELECT money
-			FROM cowoncy
-			WHERE cowoncy.id = ${msg.author.id};`;
-		sql += `SELECT name,nickname,animal.pid,pet_team.pgid,MAX(tmp.pgid) AS active
-			FROM user u
-				INNER JOIN pet_team ON u.uid = pet_team.uid
-				INNER JOIN pet_team_animal ON pet_team.pgid = pet_team_animal.pgid
-				INNER JOIN animal ON pet_team_animal.pid = animal.pid
-				LEFT JOIN (SELECT pt2.pgid FROM user u2
-						INNER JOIN pet_team pt2 ON pt2.uid = u2.uid
-						LEFT JOIN pet_team_active pt_act ON pt2.pgid = pt_act.pgid
-					WHERE u2.id = ${p.msg.author.id}
-					ORDER BY pt_act.pgid DESC, pt2.pgid ASC LIMIT 1) tmp
-					ON tmp.pgid = pet_team.pgid
-				WHERE u.id = ${p.msg.author.id}
-				GROUP BY animal.pid
-				ORDER BY pet_team_animal.pos ASC;`;
-		sql +=
-			'SELECT *,TIMESTAMPDIFF(HOUR,claim,NOW()) as time FROM lootbox WHERE id = ' +
-			msg.author.id +
-			';';
-		sql +=
-			'SELECT uid,activecount,gname,type FROM user NATURAL JOIN user_gem NATURAL JOIN gem WHERE id = ' +
-			msg.author.id +
-			' AND activecount > 0;';
-		let result = await p.query(sql);
-		if (result[0][0] == undefined || result[0][0].money < rollPrice) {
-			p.errorMsg(", You don't have enough cowoncy!", 3000);
-		} else {
-			//Sort gem benefits
-			let gems = {};
-			let uid = undefined;
-			for (let i = 0; i < result[3].length; i++) {
-				let tempGem = gemUtil.getGem(result[3][i].gname);
-				if (!(tempGem.type === 'Special' && !animalUtil.hasSpecials())) {
-					tempGem.uid = result[3][i].uid;
-					tempGem.activecount = result[3][i].activecount;
-					tempGem.gname = result[3][i].gname;
-					gems[tempGem.type] = tempGem;
-					uid = result[3][i].uid;
-				}
+		const result = await commitHunt(p, id, uid, animal, gemRows, gems, lootboxRoll);
+		if (!result.ok) {
+			if (result.reason === 'money') {
+				p.errorMsg(", You don't have enough cowoncy!", 3000);
+			} else if (result.reason === 'gems') {
+				p.errorMsg(', your active gems changed while hunting. Please try again!', 3000);
+			} else {
+				p.errorMsg(', there was an error while hunting. Please try again later.', 3000);
 			}
-
-			//Get animal
-			let animal = await getAnimals(p, result, gems, uid);
-			let sql = animal.sql;
-			let text = animal.text;
-
-			//Get Xp
-			let petText, animalXp, pgid;
-			const activePids = [];
-			if (result[1][0]) {
-				text += `\n${p.config.emoji.blank} **|** `;
-				petText = '';
-				for (let i in result[1]) {
-					if (result[1][i].active) {
-						let pet = p.global.validAnimal(result[1][i].name);
-						petText += (pet.uni ? pet.uni : pet.value) + ' ';
-						pgid = result[1][i].pgid;
-						activePids.push(result[1][i].pid);
-					}
-				}
-				animalXp = animal.xp;
-				text += `${petText}gained **${animalXp}xp**!`;
-			}
-			await teamUtil.giveXPToUserTeams(p, p.msg.author, animalXp, {
-				activePgid: pgid,
-				activePids,
-			});
-
-			//Get Lootbox
-			let lbReset = dateUtil.afterMidnight(result[2][0] ? result[2][0].claim : undefined);
-			let lootbox;
-			if (!result[2][0] || result[2][0].claimcount < 3 || lbReset.after) {
-				lootbox = getLootbox(p, result[2][0], lbReset);
-				sql += lootbox.sql;
-				text += lootbox.text;
-			}
-
-			//Alter text for legendary tier patreons
-			text = await alterHunt.alter(p, p.msg.author.id, text, {
-				author: p.msg.member || p.msg.author,
-				name: p.getName(),
-				lootboxText: lootbox ? lootbox.text : '',
-				petText,
-				animalXp,
-				gemText: animal.gemText,
-				animalText: animal.text,
-				animalEmojis: animal.animalText,
-				animals: animal.animals,
-			});
-			//text += "\n⚠ **|** `battle` and `hunt` cooldowns have increased to prevent rateLimits issues.\n<:blank:427371936482328596> **|** They will revert back to `15s` in the future.";
-
-			await p.query(sql);
-			p.logger.decr('cowoncy', -5, { type: 'hunt' }, p.msg);
-			for (let i in animal.animals) {
-				let tempAnimal = p.global.validAnimal(animal.animals[i].value);
-				p.logger.incr(
-					'animal',
-					tempAnimal.count,
-					{ rank: tempAnimal.rank, name: tempAnimal.name },
-					p.msg
-				);
-				p.logger.incr('zoo', tempAnimal.points * tempAnimal.count, {}, p.msg);
-			}
-			p.quest('hunt');
-			p.quest('find', 1, animal.typeCount);
-			p.quest('xp', animal.xp);
-			await p.send(text);
-			p.event.getEventItem.bind(this)();
+			return;
 		}
+
+		let text = animal.text;
+		let petText = '';
+		const animalXp = animal.xp;
+		if (team.pids.length) {
+			text += `\n${p.config.emoji.blank} **|** `;
+			for (const row of team.animals) {
+				const pet = p.global.validAnimal(row.name);
+				if (pet) petText += (pet.uni ? pet.uni : pet.value) + ' ';
+			}
+			text += `${petText}gained **${animalXp}xp**!`;
+		}
+		if (result.lootboxText) text += result.lootboxText;
+
+		text = await alterHunt.alter(p, p.msg.author.id, text, {
+			author: p.msg.member || p.msg.author,
+			name: p.getName(),
+			lootboxText: result.lootboxText || '',
+			petText,
+			animalXp,
+			gemText: animal.gemText,
+			animalText: animal.text,
+			animalEmojis: animal.animalText,
+			animals: animal.animals,
+		});
+
+		await teamUtil.giveXPToUserTeams(p, p.msg.author, animalXp, {
+			activePgid: team.pgid,
+			activePids: team.pids,
+		});
+
+		p.logger.decr('cowoncy', -rollPrice, { type: 'hunt' }, p.msg);
+		for (const caught of animal.animals) {
+			const tempAnimal = p.global.validAnimal(caught.value);
+			if (!tempAnimal) continue;
+			p.logger.incr(
+				'animal',
+				caught.count,
+				{ rank: tempAnimal.rank, name: tempAnimal.name },
+				p.msg
+			);
+			p.logger.incr('zoo', tempAnimal.points * caught.count, {}, p.msg);
+		}
+		p.quest('hunt');
+		p.quest('find', 1, animal.typeCount);
+		p.quest('xp', animal.xp);
+		await p.send(text);
+		p.event.getEventItem.bind(p)();
 	},
 });
 
-async function getAnimals(p, result, gems, uid) {
-	/* Parse if user is a patreon */
-	const supporter = await patreonUtil.getSupporterRank(p, p.msg.author);
-	let patreon = supporter.benefitRank > 0;
+async function getActiveGemRows(p, uid) {
+	const collection = await p.mongo.collection('user_gem');
+	return collection.find({ uid, activecount: { $gt: 0 } }).toArray();
+}
 
+function parseActiveGems(rows) {
+	const active = {};
+	for (const row of rows) {
+		const tempGem = gemUtil.getGem(row.gname);
+		if (!tempGem) continue;
+		if (tempGem.type === 'Special' && !animalUtil.hasSpecials()) continue;
+		tempGem.uid = row.uid;
+		tempGem.activecount = Number(row.activecount || 0);
+		tempGem.gname = row.gname;
+		active[tempGem.type] = tempGem;
+	}
+	return active;
+}
+
+async function getActiveTeamInfo(p, uid) {
+	const teams = await p.mongo.collection('pet_team');
+	const activeTeams = await p.mongo.collection('pet_team_active');
+	const memberships = await p.mongo.collection('pet_team_animal');
+	const animals = await p.mongo.collection('animal');
+	const teamRows = await teams.find({ uid }).sort({ pgid: 1 }).toArray();
+	if (!teamRows.length) return { pgid: null, pids: [], animals: [] };
+
+	const active = await activeTeams.findOne({ uid }, { projection: { pgid: 1 } });
+	let pgid = active?.pgid;
+	if (!pgid || !teamRows.some((row) => row.pgid === pgid)) pgid = teamRows[0].pgid;
+	const memberRows = await memberships.find({ pgid }).sort({ pos: 1 }).toArray();
+	const pids = memberRows.map((row) => row.pid);
+	if (!pids.length) return { pgid, pids: [], animals: [] };
+	const animalRows = await animals.find({ pid: { $in: pids } }).toArray();
+	const animalMap = new Map(animalRows.map((row) => [row.pid, row]));
+	return {
+		pgid,
+		pids,
+		animals: memberRows.map((row) => animalMap.get(row.pid)).filter(Boolean),
+	};
+}
+
+async function getAnimals(p, gems) {
+	const supporter = await patreonUtil.getSupporterRank(p, p.msg.author);
+	const patreon = supporter.benefitRank > 0;
 	let count = 1;
 	const opt = {
-		patreon: patreon || !!gems['Patreon'],
+		patreon: patreon || !!gems.Patreon,
 		manual: true,
 	};
-	if (Object.keys(gems).length != 0) {
+	if (Object.keys(gems).length) {
 		opt.gem = true;
-		opt.lucky = gems['Lucky'];
-		opt.special = gems['Special'];
-		if (gems['Hunting']) count += gems['Hunting'].amount;
-		if (gems['Empowering']) count *= 2;
-		if (gems['Patreon']) count += 1;
+		opt.lucky = gems.Lucky;
+		opt.special = gems.Special;
+		if (gems.Hunting) count += gems.Hunting.amount;
+		if (gems.Empowering) count *= 2;
+		if (gems.Patreon) count += 1;
 	}
 
-	let { ordered, animalSql, typeCount, xp } = await animalUtil.getMultipleAnimals(
-		count,
-		p.msg.author,
-		opt
-	);
-
-	let sql = animalSql + ' UPDATE cowoncy SET money = money - 5 WHERE id = ' + p.msg.author.id + ';';
-	sql += getGemSql(uid, gems, count);
-
-	let { animalText, text, gemText } = getText(p, ordered, gems, count);
-
+	const generated = await animalUtil.getMultipleAnimalsMongo(count, p.msg.author, opt);
+	const { animalText, text, gemText } = getText(p, generated.ordered, gems, count);
 	return {
-		sql: sql,
-		xp: xp,
-		animals: ordered,
-		text: text,
-		typeCount: typeCount,
+		xp: generated.xp,
+		animals: generated.ordered,
+		text,
+		typeCount: generated.typeCount,
 		gemText,
 		animalText,
+		animalCount: count,
 	};
 }
 
-function getLootbox(p, query, lbReset) {
-	let rand = Math.random();
-	let sql =
-		'INSERT INTO lootbox(id,boxcount,claimcount,claim) VALUES (' +
-		p.msg.author.id +
-		',1,1,' +
-		lbReset.sql +
-		') ON DUPLICATE KEY UPDATE boxcount = boxcount + 1, claimcount = 1, claim = ' +
-		lbReset.sql +
-		';';
-	let count = 1;
-	if (!query || lbReset.after) rand = 0;
-	else {
-		sql =
-			'UPDATE IGNORE lootbox SET boxcount = boxcount + 1, claimcount = claimcount + 1 WHERE id = ' +
-			p.msg.author.id +
-			';';
-		count = query.claimcount + 1;
+async function commitHunt(p, id, uid, animal, gemRows, gems, lootboxRoll) {
+	const cowoncy = await p.mongo.collection('cowoncy');
+	const userGems = await p.mongo.collection('user_gem');
+	const lootbox = await p.mongo.collection('lootbox');
+	const session = await p.mongo.startSession();
+	let outcome = { ok: false };
+
+	try {
+		await session.withTransaction(async () => {
+			outcome = { ok: false };
+			if (!(await verifyGemSnapshot(userGems, gemRows, session))) {
+				outcome = { ok: false, reason: 'gems' };
+				return;
+			}
+
+			const debit = await mongoNumeric.subtractIfEnough(
+				cowoncy,
+				{ id },
+				'money',
+				rollPrice,
+				{ session }
+			);
+			if (!debit.modifiedCount) {
+				outcome = { ok: false, reason: 'money' };
+				return;
+			}
+
+			await animalUtil.applyAnimalBatch(id, animal.animals, animal.typeCount, { session });
+			await consumeGems(userGems, uid, gems, animal.animalCount, session);
+			const lootboxText = await maybeGrantLootbox(p, lootbox, id, lootboxRoll, session);
+			outcome = { ok: true, lootboxText };
+		});
+	} catch (err) {
+		console.error(err);
+		return { ok: false, reason: 'error' };
+	} finally {
+		await session.endSession();
 	}
-	if (rand <= lootboxChance) {
-		return {
-			sql: sql,
-			text:
-				'\n**<:box:427352600476647425> |** You found a **lootbox**! `[' +
-				count +
-				'/3] RESETS IN: ' +
-				lbReset.hours +
-				'H ' +
-				lbReset.minutes +
-				'M ' +
-				lbReset.seconds +
-				'S`',
-		};
-	} else return { sql: '', text: '' };
+	return outcome;
 }
 
-function getGemSql(uid, gems, animalCount) {
-	/* Construct sql statements for gem usage */
-	let sql = '';
-	let huntingActive = false;
-	let empoweringActive = false;
-	if (gems['Patreon'])
-		sql +=
-			'UPDATE user_gem SET activecount = GREATEST(activecount - 1, 0) WHERE uid = ' +
-			uid +
-			" AND gname = '" +
-			gems['Patreon'].gname +
-			"';";
-	if (gems['Hunting']) {
-		huntingActive = true;
-		sql +=
-			'UPDATE user_gem SET activecount = GREATEST(activecount - 1, 0) WHERE uid = ' +
-			uid +
-			" AND gname = '" +
-			gems['Hunting'].gname +
-			"';";
+async function verifyGemSnapshot(collection, rows, session) {
+	for (const row of rows) {
+		const current = await collection.findOne(
+			{ uid: row.uid, gname: row.gname },
+			{ projection: { activecount: 1 }, session }
+		);
+		if (Number(current?.activecount || 0) !== Number(row.activecount || 0)) return false;
 	}
-	if (gems['Empowering']) {
-		empoweringActive = true;
-		sql +=
-			'UPDATE user_gem SET activecount = GREATEST(activecount - ' +
-			Math.trunc(animalCount / 2) +
-			', 0) WHERE uid = ' +
-			uid +
-			" AND gname = '" +
-			gems['Empowering'].gname +
-			"';";
-	}
-	if (gems['Lucky']) {
-		// make lucky gems last twice as long if you're running all 3 gems
-		let luckySubtract =
-			huntingActive && empoweringActive ? Math.trunc(animalCount / 2) : animalCount;
+	return true;
+}
 
-		sql +=
-			'UPDATE user_gem SET activecount = GREATEST(activecount - ' +
-			luckySubtract +
-			', 0) WHERE uid = ' +
-			uid +
-			" AND gname = '" +
-			gems['Lucky'].gname +
-			"';";
-	}
-	if (gems['Special']) {
-		// make special gems last twice as long if you're running all 3 gems
-		let specialSubtract =
-			huntingActive && empoweringActive ? Math.trunc(animalCount / 2) : animalCount;
+async function consumeGems(collection, uid, gems, animalCount, session) {
+	const huntingActive = !!gems.Hunting;
+	const empoweringActive = !!gems.Empowering;
+	const sharedSubtract = huntingActive && empoweringActive ? Math.trunc(animalCount / 2) : animalCount;
+	const changes = [];
+	if (gems.Patreon) changes.push([gems.Patreon.gname, 1]);
+	if (gems.Hunting) changes.push([gems.Hunting.gname, 1]);
+	if (gems.Empowering) changes.push([gems.Empowering.gname, Math.trunc(animalCount / 2)]);
+	if (gems.Lucky) changes.push([gems.Lucky.gname, sharedSubtract]);
+	if (gems.Special) changes.push([gems.Special.gname, sharedSubtract]);
 
-		sql +=
-			'UPDATE user_gem SET activecount = GREATEST(activecount - ' +
-			specialSubtract +
-			', 0) WHERE uid = ' +
-			uid +
-			" AND gname = '" +
-			gems['Special'].gname +
-			"';";
+	for (const [gname, amount] of changes) {
+		await collection.updateOne(
+			{ uid, gname },
+			[
+				{
+					$set: {
+						activecount: {
+							$max: [{ $subtract: [{ $ifNull: ['$activecount', 0] }, amount] }, 0],
+						},
+					},
+				},
+			],
+			{ session }
+		);
 	}
-	return sql;
+}
+
+async function maybeGrantLootbox(p, collection, id, roll, session) {
+	const row = await collection.findOne({ id }, { session });
+	const reset = dateUtil.afterMidnight(row?.claim);
+	const currentCount = reset.after ? 0 : Number(row?.claimcount || 0);
+	if (currentCount >= 3) return '';
+	if (!reset.after && roll > lootboxChance) return '';
+
+	const nextCount = currentCount + 1;
+	if (reset.after) {
+		await collection.updateOne(
+			{ id },
+			{
+				$inc: { boxcount: 1 },
+				$set: { claimcount: 1, claim: reset.now },
+				$setOnInsert: { id, fbox: 0 },
+			},
+			{ upsert: true, session }
+		);
+	} else {
+		await collection.updateOne(
+			{ id },
+			{ $inc: { boxcount: 1, claimcount: 1 }, $setOnInsert: { id, claim: legacyClaimDate, fbox: 0 } },
+			{ upsert: true, session }
+		);
+	}
+
+	return (
+		'\n**<:box:427352600476647425> |** You found a **lootbox**! `[' +
+		nextCount +
+		'/3] RESETS IN: ' +
+		reset.hours +
+		'H ' +
+		reset.minutes +
+		'M ' +
+		reset.seconds +
+		'S`'
+	);
 }
 
 function getText(p, animals, gems, animalCount) {
-	/* Construct output message for user */
 	let animalText = global.unicodeAnimal(animals[0].value);
 	let text =
 		'**🌱 | ' +
@@ -316,23 +322,24 @@ function getText(p, animals, gems, animalCount) {
 		global.unicodeAnimal(animals[0].value) +
 		'!';
 	let gemText;
-	if (animals[0].text.charAt(2) == 'u' || animals[0].text.charAt(2) == 'e')
+	if (animals[0].text.charAt(2) == 'u' || animals[0].text.charAt(2) == 'e') {
 		text = text.replace(' a ', ' an ');
+	}
 
 	if (Object.keys(gems).length > 0) {
 		text = '**🌱 | ' + p.getName() + '**, hunt is empowered by ';
 		gemText = '';
-		for (let i in gems) {
-			let remaining = gems[i].activecount;
+		for (const key in gems) {
+			let remaining = gems[key].activecount;
 			let subtract = 1;
-			if (gems[i].type == 'Patreon' || gems[i].type == 'Hunting') {
+			if (gems[key].type == 'Patreon' || gems[key].type == 'Hunting') {
 				subtract = 1;
-			} else if (gems[i].type == 'Empowering') {
+			} else if (gems[key].type == 'Empowering') {
 				subtract = Math.trunc(animalCount / 2);
 			} else if (
-				['Lucky', 'Special'].includes(gems[i].type) &&
-				gems['Hunting'] &&
-				gems['Empowering']
+				['Lucky', 'Special'].includes(gems[key].type) &&
+				gems.Hunting &&
+				gems.Empowering
 			) {
 				subtract = Math.trunc(animalCount / 2);
 			} else {
@@ -340,21 +347,17 @@ function getText(p, animals, gems, animalCount) {
 			}
 			remaining -= subtract;
 			if (remaining < 0) remaining = 0;
-			gemText += gems[i].emoji + '`[' + remaining + '/' + gems[i].length + ']` ';
+			gemText += gems[key].emoji + '`[' + remaining + '/' + gems[key].length + ']` ';
 		}
 		text += gemText + ' !\n**<:blank:427371936482328596> |** You found: ';
 		animalText = '';
-		for (let i = 0; i < animals.length; i++) {
-			for (let j = 0; j < animals[i].count; j++) {
-				animalText += ' ' + global.unicodeAnimal(animals[i].value);
+		for (const animal of animals) {
+			for (let j = 0; j < animal.count; j++) {
+				animalText += ' ' + global.unicodeAnimal(animal.value);
 			}
 		}
 		text += animalText;
 	}
 
-	return {
-		animalText,
-		text,
-		gemText,
-	};
+	return { animalText, text, gemText };
 }
