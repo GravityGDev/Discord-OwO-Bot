@@ -42,6 +42,7 @@ jobs:
           node --check src/utils/rewardUtil.js
           node --check src/utils/eventUtil.js
           node --check src/utils/giveaway.js
+          node --check src/utils/animalInfoUtil.js
           node --check src/botHandlers/questHandler.js
           node --check src/commands/command.js
           node --check src/commands/commandList/ranking/rankingMongoUtil.js
@@ -62,6 +63,7 @@ jobs:
           node --check scripts/migrate-mysql-to-mongodb.js
           node --check scripts/migrate-redis-to-mongodb.js
           node --check scripts/audit-mongodb-cutover.js
+          node --check scripts/smoke-mongo-runtime.js
 
       - name: Check circular dependencies
         run: npx -p dpdm@3.13.1 dpdm --exit-code circular:1 ./src/owo.js
@@ -82,3 +84,67 @@ jobs:
           git add package-lock.json
           git commit -m "Update package lock for MongoDB migration"
           git push origin HEAD:mongodb-migration
+
+  mongo-runtime-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout migration branch
+        uses: actions/checkout@v4
+        with:
+          ref: mongodb-migration
+
+      - name: Use Node.js 15.14.0
+        uses: actions/setup-node@v4
+        with:
+          node-version: 15.14.0
+
+      - name: Install runtime dependencies without native build scripts
+        run: npm install --ignore-scripts --no-audit --no-fund
+
+      - name: Start MongoDB replica set
+        shell: bash
+        run: |
+          docker run -d --name owo-mongo-smoke -p 27017:27017 mongo:6.0 --replSet rs0 --bind_ip_all
+
+          ready=0
+          for i in {1..60}; do
+            if docker exec owo-mongo-smoke mongosh --quiet --eval "db.adminCommand('ping').ok" 2>/dev/null | grep -q '^1$'; then
+              ready=1
+              break
+            fi
+            sleep 1
+          done
+          if [ "$ready" != "1" ]; then
+            docker logs owo-mongo-smoke
+            exit 1
+          fi
+
+          docker exec owo-mongo-smoke mongosh --quiet --eval 'rs.initiate({_id:"rs0",members:[{_id:0,host:"localhost:27017"}]})'
+
+          primary=0
+          for i in {1..60}; do
+            if docker exec owo-mongo-smoke mongosh --quiet --eval 'try { rs.status().myState } catch (e) { 0 }' 2>/dev/null | grep -q '^1$'; then
+              primary=1
+              break
+            fi
+            sleep 1
+          done
+          if [ "$primary" != "1" ]; then
+            docker logs owo-mongo-smoke
+            exit 1
+          fi
+
+      - name: Exercise runtime MongoDB transactions and exact arithmetic
+        env:
+          MONGODB_URI: mongodb://127.0.0.1:27017/owo_smoke?replicaSet=rs0
+          MONGODB_DB: owo_smoke
+          MONGODB_SERVER_SELECTION_TIMEOUT: 10000
+        run: node scripts/smoke-mongo-runtime.js
+
+      - name: Show MongoDB logs on failure
+        if: failure()
+        run: docker logs owo-mongo-smoke || true
+
+      - name: Stop MongoDB smoke container
+        if: always()
+        run: docker rm -f owo-mongo-smoke || true
