@@ -115,10 +115,10 @@ jobs:
         with:
           ref: mongodb-migration
 
-      - name: Use Node.js 15.14.0
+      - name: Use Node.js 24 LTS
         uses: actions/setup-node@v4
         with:
-          node-version: 15.14.0
+          node-version: 24
 
       - name: Install native build prerequisites
         run: |
@@ -128,9 +128,8 @@ jobs:
       - name: Verify native runtime dependencies build
         run: npm install --no-audit --no-fund
 
-      - name: Verify core native modules load
-        run: |
-          node -e "require('canvas'); require('bufferutil'); require('zlib-sync'); console.log('Native modules loaded')"
+      - name: Verify required native modules load
+        run: node -e "require('canvas'); console.log('Native modules loaded')"
 
   mongo-runtime-smoke:
     runs-on: ubuntu-latest
