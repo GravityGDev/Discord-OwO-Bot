@@ -9,7 +9,9 @@
 		"prettier": "npx prettier --check .",
 		"prettier:fix": "npx prettier --write .",
 		"format": "npm run lint:fix && npm run prettier:fix",
-		"checkCircular": "./node_modules/dpdm/lib/bin/dpdm.js --exit-code circular:1 ./src/owo.js"
+		"checkCircular": "./node_modules/dpdm/lib/bin/dpdm.js --exit-code circular:1 ./src/owo.js",
+		"migrate:mysql-to-mongo": "node scripts/migrate-mysql-to-mongodb.js",
+		"migrate:redis-to-mongo": "node scripts/migrate-redis-to-mongodb.js"
 	},
 	"dependencies": {
 		"@2toad/profanity": "^1.3.0",
@@ -41,6 +43,7 @@
 		"pluralize": "^8.0.0",
 		"prettier": "^2.8.0",
 		"random-number-csprng": "^1.0.2",
+		"redis": "^2.8.0",
 		"request": "^2.88.2",
 		"require-dir": "^1.2.0",
 		"socket.io-client": "^4.1.3",
