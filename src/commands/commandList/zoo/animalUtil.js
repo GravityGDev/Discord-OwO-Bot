@@ -181,9 +181,7 @@ function generateMultipleAnimals(count, opt) {
 }
 
 exports.getMultipleAnimals = async function (count, user, opt) {
-	const generated = generateMultipleAnimals(count, opt);
-	const { sql } = await createSql(generated.ordered, user, generated.typeCount);
-	return { ...generated, animalSql: sql };
+	return exports.getMultipleAnimalsMongo(count, user, opt);
 };
 
 exports.getMultipleAnimalsMongo = async function (count, user, opt) {
@@ -296,27 +294,4 @@ function buildTypeCount(ordered) {
 		byRank[animal.rank].count += animal.count;
 	}
 	return Object.values(byRank);
-}
-
-async function createSql(orderedAnimal, user, typeCount) {
-	const animalSql = [];
-	let animalCase = '( CASE\n';
-	const animalNames = [];
-	orderedAnimal.forEach((animal) => {
-		animalSql.push(`(${user.id}, '${animal.value}', ${animal.count}, ${animal.count})`);
-		animalNames.push(`'${animal.value}'`);
-		animalCase += `WHEN name = '${animal.value}' THEN ${animal.count}\n`;
-	});
-	animalCase += 'ELSE 0 END)';
-
-	let sql = `UPDATE animal SET 
-			count = count + ${animalCase}, totalcount = totalcount + ${animalCase}
-			WHERE id = ${user.id} AND name in (${animalNames.join(',')});`;
-	sql += `INSERT INTO animal_count (id, ${typeCount.map((row) => row.rank).join(',')})
-			VALUES (${user.id}, ${typeCount.map((row) => row.count).join(',')})
-			ON DUPLICATE KEY UPDATE
-				${typeCount.map((row) => `${row.rank} = ${row.rank} + ${row.count}`).join(',')};
-			`;
-	await ensureAnimalBatch(user.id, orderedAnimal);
-	return { sql, typeCount };
 }
