@@ -17,16 +17,13 @@ class OwO extends Base {
 		super(bot);
 		this.dbl = dbl;
 
-		// MongoDB is the target persistence layer for all bot state.
+		// MongoDB is the runtime persistence layer for bot state.
 		this.mongo = require('./utils/mongo.js');
 		this.mongoReady = this.mongo.connect();
 		this.mongoReady.catch((err) => {
 			console.error('[MongoDB] Initial connection failed');
 			console.error(err);
 		});
-
-		// Temporary legacy SQL connection while command domains are migrated.
-		this.mysql = require('./utils/mysql.js');
 
 		// MongoDB-backed compatibility cache (keeps the previous Redis API shape).
 		this.redis = require('./utils/redis.js');
@@ -65,10 +62,6 @@ class OwO extends Base {
 
 		// Quest Handler
 		this.questHandler = new (require('./botHandlers/questHandler.js'))();
-
-		// Temporary legacy SQL query handler while command domains are migrated.
-		this.mysqlhandler = require('./botHandlers/mysqlHandler.js');
-		this.query = this.mysqlhandler.query;
 
 		this.cache = require('./utils/cacheUtil.js');
 
@@ -150,9 +143,7 @@ class OwO extends Base {
 
 	async setOptOut() {
 		const ids = await this.redis.hgetall('optOut');
-		for (let id in ids) {
-			this.optOut[id] = true;
-		}
+		for (let id in ids) this.optOut[id] = true;
 	}
 }
 
