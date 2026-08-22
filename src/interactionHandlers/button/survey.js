@@ -10,72 +10,59 @@ const surveyEmoji = '📝';
 exports.handle = async function (data, ack) {
 	const user = data.member.user;
 	const uid = await this.global.getUid(user.id);
-
-	if (!(await startSurvey.bind(this)(user, uid))) {
-		return;
-	}
-
+	if (!(await startSurvey.bind(this)(user, uid))) return;
 	await ack();
 };
 
 async function startSurvey(user, uid) {
-	const con = await this.mysqlhandler.startTransaction();
+	const surveys = await this.mongo.collection('survey');
+	const questions = await this.mongo.collection('survey_question');
+	const userSurveys = await this.mongo.collection('user_survey');
+	const session = await this.mongo.startSession();
+	let survey;
+	let started = false;
 
 	try {
-		let sql = `SELECT * FROM user_survey WHERE uid = ${uid};`;
-		sql +=
-			'SELECT * FROM survey_question WHERE sid = (SELECT sid FROM survey ORDER BY sid DESC LIMIT 1);';
-		let result = await con.query(sql);
+		await session.withTransaction(async () => {
+			started = false;
+			const latest = await surveys.findOne({}, { sort: { sid: -1 }, session });
+			if (!latest) return;
 
-		const userSurvey = result[0][0];
-		const survey = result[1];
+			survey = await questions.find({ sid: latest.sid }, { session }).sort({ number: 1 }).toArray();
+			if (!survey.length) return;
 
-		// Survey does not exist
-		if (!survey[0]) {
-			con.rollback();
-			return false;
-		}
+			const state = await userSurveys.findOne({ uid }, { session });
+			if (state?.in_progress) return;
+			if (state?.sid == latest.sid && state?.is_done) return;
 
-		// User's first time survey
-		if (!userSurvey) {
-			sql = `INSERT IGNORE INTO user_survey (uid, sid) VALUES (${uid}, ${survey[0].sid})`;
-			await con.query(sql);
-
-			// User in a survey
-		} else if (userSurvey.in_progress) {
-			con.rollback();
-			return false;
-
-			// User finished latest survey
-		} else if (userSurvey.sid == survey[0].sid && userSurvey.is_done) {
-			con.rollback();
-			return false;
-		}
-
-		sql = `UPDATE user_survey us
-				SET us.in_progress = 1,
-					us.sid = ${survey[0].sid},
-					us.question_number = 1,
-					us.is_done = 0
-				WHERE us.uid = ${uid};`;
-		result = await con.query(sql);
-		if (!result.changedRows) {
-			con.rollback();
-			return false;
-		}
-
-		let text = `${surveyEmoji} **|** Thanks for participating in the survey! There are ${survey.length} questions.`;
-		text += `\n${this.config.emoji.blank} **|** You will get a reward for completing all questions.`;
-		text += `\n${this.config.emoji.blank} **|** All answers are submitted anonymously.`;
-		text += `\n\n**Question 1:** *${survey[0].question}*`;
-		await this.sender.msgUser(user.id, text);
-
-		await con.commit();
+			await userSurveys.updateOne(
+				{ uid },
+				{
+					$set: {
+						uid,
+						sid: latest.sid,
+						in_progress: 1,
+						question_number: 1,
+						is_done: 0,
+					},
+				},
+				{ upsert: true, session }
+			);
+			started = true;
+		});
 	} catch (err) {
 		console.error(err);
-		con.rollback();
 		return false;
+	} finally {
+		await session.endSession();
 	}
 
+	if (!started || !survey?.length) return false;
+
+	let text = `${surveyEmoji} **|** Thanks for participating in the survey! There are ${survey.length} questions.`;
+	text += `\n${this.config.emoji.blank} **|** You will get a reward for completing all questions.`;
+	text += `\n${this.config.emoji.blank} **|** All answers are submitted anonymously.`;
+	text += `\n\n**Question 1:** *${survey[0].question}*`;
+	await this.sender.msgUser(user.id, text);
 	return true;
 }
