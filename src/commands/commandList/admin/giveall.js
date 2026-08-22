@@ -6,6 +6,7 @@
  */
 
 const CommandInterface = require('../../CommandInterface.js');
+const mongoNumeric = require('../../../utils/mongoNumeric.js');
 
 module.exports = new CommandInterface({
 	alias: ['giveall'],
@@ -16,10 +17,24 @@ module.exports = new CommandInterface({
 		let amount = 0;
 		if (p.global.isInt(p.args[0])) amount = parseInt(p.args[0]);
 		else return;
-		let users = p.global.getids(p.msg.channel.guild.members);
-		let sql =
-			'UPDATE IGNORE cowoncy SET money = money + ' + amount + ' WHERE id IN (' + users + ');';
-		await p.query(sql);
+
+		const ids = [];
+		p.msg.channel.guild.members.forEach((_member, id) => ids.push(String(id)));
+		const cowoncy = await p.mongo.collection('cowoncy');
+		await cowoncy.updateMany(
+			{ id: { $in: ids } },
+			[
+				{
+					$set: {
+						money: {
+							$toString: {
+								$add: [mongoNumeric.fieldAsDecimal('money'), mongoNumeric.decimal(amount)],
+							},
+						},
+					},
+				},
+			]
+		);
 		p.send('**💎 |** ' + p.getName() + ' gave @everyone ' + amount + ' cowoncy!!!');
 	},
 });
