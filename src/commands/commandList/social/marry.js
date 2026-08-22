@@ -59,13 +59,11 @@ module.exports = new CommandInterface({
 	cooldown: 30000,
 
 	execute: async function (p) {
-		/* Multiple validation checks on user arguments */
 		if (p.args.length <= 1) {
 			display(p);
 			return;
 		}
 
-		/* Parse user id and ring id from arguments */
 		let id;
 		let ringId;
 		if (p.global.isUser(p.args[0]) && p.global.isInt(p.args[1])) {
@@ -82,7 +80,6 @@ module.exports = new CommandInterface({
 			return;
 		}
 
-		/* More validation checks */
 		if (ringId < 1 || ringId > 7) {
 			p.errorMsg(", that's not a valid ring id!", 3000);
 			return;
@@ -103,45 +100,101 @@ module.exports = new CommandInterface({
 			return;
 		}
 
-		/* Send proposal*/
 		await propose(p, user, ringId);
 	},
 });
 
 async function propose(p, user, ringId) {
-	/* Check if the opponent or user already has a request */
-	let sql = `SELECT 
-			(SELECT id FROM user WHERE uid = uid1) AS id1,
-			(SELECT id FROM user WHERE uid = uid2) AS id2,
-			marriage.* 
-		FROM marriage WHERE uid1 IN (SELECT uid FROM user WHERE id IN (${p.msg.author.id},${user.id})) OR uid2 IN (SELECT uid FROM user WHERE id IN (${p.msg.author.id},${user.id}));`;
-	sql += `SELECT * FROM propose WHERE sender IN (${p.msg.author.id},${user.id}) OR receiver IN (${p.msg.author.id},${user.id});`;
-	sql += `SELECT * FROM user_ring INNER JOIN user ON user_ring.uid = user.uid WHERE id = ${p.msg.author.id} AND rid = ${ringId} AND rcount > 0;`;
-	let result = await p.query(sql);
-	if (result[0].length > 0) {
-		upgradeRing(p, user, ringId, result[0][0], result[2]);
-		return;
-	}
-	if (result[1].length > 0) {
-		p.errorMsg(', you or your friend already has a marriage pending!');
+	const senderId = String(p.msg.author.id);
+	const receiverId = String(user.id);
+	const senderUid = await p.global.getUid(senderId);
+	const receiverUid = await p.global.getUid(receiverId);
+	const marriages = await p.mongo.collection('marriage');
+	const proposals = await p.mongo.collection('propose');
+	const userRings = await p.mongo.collection('user_ring');
+
+	const marriage = await marriages.findOne({
+		$or: [
+			{ uid1: { $in: [senderUid, receiverUid] } },
+			{ uid2: { $in: [senderUid, receiverUid] } },
+		],
+	});
+	const ringInventory = await userRings.findOne({ uid: senderUid, rid: ringId, rcount: { $gt: 0 } });
+
+	if (marriage) {
+		const users = await p.mongo.collection('user');
+		const marriageUsers = await users
+			.find({ uid: { $in: [marriage.uid1, marriage.uid2] } }, { projection: { uid: 1, id: 1 } })
+			.toArray();
+		const ids = new Map(marriageUsers.map((row) => [row.uid, String(row.id)]));
+		await upgradeRing(
+			p,
+			user,
+			ringId,
+			{ ...marriage, id1: ids.get(marriage.uid1), id2: ids.get(marriage.uid2) },
+			!!ringInventory
+		);
 		return;
 	}
 
-	/* Check if the user has the specified ring */
-	sql = `UPDATE user_ring INNER JOIN user ON user_ring.uid = user.uid SET rcount = rcount - 1 WHERE id = ${p.msg.author.id} AND rid = ${ringId} AND rcount > 0;`;
-	sql += `SELECT * FROM user WHERE id = ${user.id}`;
-	result = await p.query(sql);
-	if (result[0].changedRows < 1) {
+	const pending = await proposals.findOne({
+		$or: [
+			{ sender: { $in: [senderId, receiverId] } },
+			{ receiver: { $in: [senderId, receiverId] } },
+		],
+	});
+	if (pending) {
+		p.errorMsg(', you or your friend already has a marriage pending!');
+		return;
+	}
+	if (!ringInventory) {
 		p.errorMsg(", You don't have this ring! Please buy one at `owo shop`!");
 		return;
 	}
 
-	/* Insert proposal to the database */
-	sql = `INSERT INTO propose (sender,receiver,rid) VALUES (${p.msg.author.id},${user.id},${ringId});`;
-	if (result[1].length < 1) sql += `INSERT IGNORE INTO user (id,count) VALUES (${user.id},0);`;
-	result = await p.query(sql);
+	const session = await p.mongo.startSession();
+	try {
+		session.startTransaction();
+		const stillPending = await proposals.findOne(
+			{
+				$or: [
+					{ sender: { $in: [senderId, receiverId] } },
+					{ receiver: { $in: [senderId, receiverId] } },
+				],
+			},
+			{ session }
+		);
+		if (stillPending) {
+			await session.abortTransaction();
+			p.errorMsg(', you or your friend already has a marriage pending!');
+			return;
+		}
 
-	/* send proposal message to discord */
+		const decrement = await userRings.updateOne(
+			{ uid: senderUid, rid: ringId, rcount: { $gt: 0 } },
+			{ $inc: { rcount: -1 } },
+			{ session }
+		);
+		if (!decrement.modifiedCount) {
+			await session.abortTransaction();
+			p.errorMsg(", You don't have this ring! Please buy one at `owo shop`!");
+			return;
+		}
+
+		await proposals.insertOne(
+			{ sender: senderId, receiver: receiverId, rid: ringId, time: new Date() },
+			{ session }
+		);
+		await session.commitTransaction();
+	} catch (err) {
+		if (session.inTransaction()) await session.abortTransaction();
+		console.error(err);
+		p.errorMsg(', failed to create that marriage proposal. Please try again later.', 3000);
+		return;
+	} finally {
+		await session.endSession();
+	}
+
 	let ring = rings[ringId];
 	let embed = {
 		fields: [
@@ -170,17 +223,16 @@ async function propose(p, user, ringId) {
 	p.send({ embed });
 }
 
-async function upgradeRing(p, user, ringId, result, ringResult) {
-	// Validation checks
+async function upgradeRing(p, user, ringId, result, hasRing) {
 	if (
 		!(
-			(p.msg.author.id == result.id1 && user.id == result.id2) ||
-			(p.msg.author.id == result.id2 && user.id == result.id1)
+			(String(p.msg.author.id) == result.id1 && String(user.id) == result.id2) ||
+			(String(p.msg.author.id) == result.id2 && String(user.id) == result.id1)
 		)
 	) {
 		p.errorMsg(', you or your friend is already married!');
 		return;
-	} else if (ringResult.length < 1) {
+	} else if (!hasRing) {
 		p.errorMsg(", you cannot upgrade your ring if you don't have it silly!", 3000);
 		return;
 	} else if (ringId == result.rid) {
@@ -188,7 +240,6 @@ async function upgradeRing(p, user, ringId, result, ringResult) {
 		return;
 	}
 
-	// Send confirmation message
 	let currentRing = rings[result.rid];
 	let newRing = rings[ringId];
 	let embed = {
@@ -213,7 +264,6 @@ async function upgradeRing(p, user, ringId, result, ringResult) {
 	};
 	let msg = await p.send({ embed });
 
-	// Add reaction collector
 	await msg.addReaction(yes);
 	await msg.addReaction(no);
 	let filter = (emoji, userID) =>
@@ -226,47 +276,61 @@ async function upgradeRing(p, user, ringId, result, ringResult) {
 		collector.stop('done');
 		if (emoji.name == yes) {
 			embed.color = 6381923;
+			const uid = await p.global.getUid(p.msg.author.id);
+			const session = await p.mongo.startSession();
+			try {
+				session.startTransaction();
+				const userRings = await p.mongo.collection('user_ring');
+				const decrement = await userRings.updateOne(
+					{ uid, rid: ringId, rcount: { $gt: 0 } },
+					{ $inc: { rcount: -1 } },
+					{ session }
+				);
+				if (!decrement.modifiedCount) {
+					await session.abortTransaction();
+					embed.description += "\n\n🚫 I don't see the ring in your inventory... 😏";
+					await msg.edit({ embed });
+					return;
+				}
 
-			// Delete ring from user inventory
-			let sql = `UPDATE user_ring INNER JOIN user ON user_ring.uid = user.uid SET rcount = rcount - 1 WHERE id = ${p.msg.author.id} AND rid = ${ringId} AND rcount > 0;`;
-			let iresult = await p.query(sql);
-			if (iresult.changedRows < 1) {
-				embed.description =
-					embed.description + "\n\n🚫 I don't see the ring in your inventory... 😏";
-				msg.edit({ embed });
+				const marriages = await p.mongo.collection('marriage');
+				const changed = await marriages.updateOne(
+					{ uid1: result.uid1, uid2: result.uid2 },
+					{ $set: { rid: ringId } },
+					{ session }
+				);
+				if (!changed.matchedCount) {
+					await session.abortTransaction();
+					embed.description += '\n\n🚫 You are currently not married...';
+					await msg.edit({ embed });
+					return;
+				}
+				await session.commitTransaction();
+			} catch (err) {
+				if (session.inTransaction()) await session.abortTransaction();
+				console.error(err);
+				embed.description += '\n\n🚫 Failed to change the ring. Please try again later.';
+				await msg.edit({ embed });
 				return;
+			} finally {
+				await session.endSession();
 			}
 
-			// Add ring to marriage
-			sql = `UPDATE marriage SET rid = ${ringId} WHERE uid1 = ${result.uid1} AND uid2 = ${result.uid2}`;
-			iresult = await p.query(sql);
-			if (iresult.changedRows < 1) {
-				sql = `UPDATE user_ring INNER JOIN user ON user_ring.uid = user.uid SET rcount = rcount + 1 WHERE id = ${p.msg.author.id} AND rid = ${ringId};`;
-				p.query(sql);
-				embed.description = embed.description + '\n\n🚫 You are currently not married...';
-				msg.edit({ embed });
-				return;
-			}
-
-			// Update message
-			embed.description =
-				embed.description + '\n\n' + newRing.emoji + ' You decided to change the ring!';
+			embed.description += '\n\n' + newRing.emoji + ' You decided to change the ring!';
 			embed.thumbnail.url =
 				'https://cdn.discordapp.com/emojis/' +
 				newRing.emoji.match(/[0-9]+/)[0] +
 				'.' +
 				(newRing.id > 5 ? 'gif' : 'png');
-			msg.edit({ embed });
+			await msg.edit({ embed });
 		} else {
 			embed.color = 6381923;
-			embed.description =
-				embed.description + '\n\n' + currentRing.emoji + ' You decided not to upgrade';
-			msg.edit({ embed });
+			embed.description += '\n\n' + currentRing.emoji + ' You decided not to upgrade';
+			await msg.edit({ embed });
 		}
 	});
 
-	// Once reaction collector ends, change color of embed message
-	collector.on('end', async function (collected, reason) {
+	collector.on('end', async function (_collected, reason) {
 		if (reason == 'done') return;
 		embed.color = 6381923;
 		await msg.edit({ embed });
@@ -274,16 +338,11 @@ async function upgradeRing(p, user, ringId, result, ringResult) {
 }
 
 async function display(p) {
-	// Grab marriage information
 	const uid = await p.global.getUid(p.msg.author.id);
-	let sql = `SELECT
-			TIMESTAMPDIFF(DAY, marriedDate, NOW()) as days,
-			marriage.* 
-		FROM marriage 
-		WHERE uid1 = ${uid} OR uid2 = ${uid};`;
-	let result = await p.query(sql);
+	const marriages = await p.mongo.collection('marriage');
+	const result = await marriages.findOne({ $or: [{ uid1: uid }, { uid2: uid }] });
 
-	if (result.length < 1) {
+	if (!result) {
 		p.errorMsg(
 			', you are not married! Please purchase and include the ring id in the command! ex. `owo marry @user {ringID}`',
 			3000
@@ -291,15 +350,14 @@ async function display(p) {
 		return;
 	}
 
-	// Grab user and ring information
-	let ring = rings[result[0].rid];
-	let so = uid == result[0].uid1 ? result[0].uid2 : result[0].uid1;
-	sql = `SELECT id FROM user WHERE uid = ${so}`;
-	const result2 = await p.query(sql);
-	so = result2[0].id;
-	so = await p.fetch.getUser(so);
+	let ring = rings[result.rid];
+	let soUid = uid == result.uid1 ? result.uid2 : result.uid1;
+	const users = await p.mongo.collection('user');
+	const storedPartner = await users.findOne({ uid: soUid }, { projection: { id: 1 } });
+	const so = storedPartner?.id ? await p.fetch.getUser(String(storedPartner.id)) : null;
+	const marriedDate = new Date(result.marriedDate);
+	const days = Math.max(0, Math.floor((Date.now() - marriedDate.getTime()) / 86400000));
 
-	// Display marriage info
 	let embed = {
 		author: {
 			name: p.getName() + ', you are happily married to ' + (so ? so.username : 'someone') + '!',
@@ -307,11 +365,11 @@ async function display(p) {
 		},
 		description:
 			'Married since **' +
-			new Date(result[0].marriedDate).toLocaleDateString('default', dateOptions) +
+			marriedDate.toLocaleDateString('default', dateOptions) +
 			'** (**' +
-			result[0].days +
+			days +
 			' days**)\nYou have claimed **' +
-			result[0].dailies +
+			(result.dailies || 0) +
 			' dailies** together!\n' +
 			quotes[Math.floor(Math.random() * quotes.length)] +
 			' ' +
@@ -328,10 +386,10 @@ async function display(p) {
 
 	embed = alterMarry.alter(p, embed, {
 		user: p.msg.author,
-		so: so,
-		marriedSince: new Date(result[0].marriedDate).toLocaleDateString('default', dateOptions),
-		marriedDays: result[0].days,
-		marriedClaims: result[0].dailies,
+		so,
+		marriedSince: marriedDate.toLocaleDateString('default', dateOptions),
+		marriedDays: days,
+		marriedClaims: result.dailies || 0,
 	});
 	p.send({ embed });
 }
