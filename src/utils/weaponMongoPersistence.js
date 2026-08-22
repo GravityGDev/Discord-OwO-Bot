@@ -1,15 +1,13 @@
 /*
- * MongoDB persistence adapter for battle weapons.
+ * MongoDB persistence helpers for battle weapons.
  *
- * The weapon classes intentionally remain focused on combat behaviour. This
- * module replaces their legacy SQL persistence methods at startup while the
- * rest of the weapon command surface is migrated incrementally.
+ * WeaponInterface delegates its database-facing methods here so combat logic
+ * stays separate from persistence while the bot finishes the MongoDB cutover.
  */
 
 const mongo = require('./mongo.js');
 const counters = require('./mongoCounters.js');
 const global = require('./global.js');
-const WeaponInterface = require('../commands/commandList/battle/WeaponInterface.js');
 
 let installed = false;
 let counterSeeded = false;
@@ -141,12 +139,14 @@ async function saveTakedownTracker() {
 	this.currKills = {};
 }
 
+exports.saveWeapon = saveWeapon;
+exports.updateWeapon = updateWeapon;
+exports.saveTakedownTracker = saveTakedownTracker;
+
+// Compatibility for already-loaded weapon classes during the migration.
 exports.install = function () {
 	if (installed) return;
-	// A few legacy helper signatures do not receive the command context. Give
-	// them a Mongo-only handle without reintroducing the old query helper.
-	global.main = global.main || { mongo };
-	if (!global.main.mongo) global.main.mongo = mongo;
+	const WeaponInterface = require('../commands/commandList/battle/WeaponInterface.js');
 	WeaponInterface.prototype.save = saveWeapon;
 	WeaponInterface.prototype.update = updateWeapon;
 	WeaponInterface.prototype.saveTT = saveTakedownTracker;
