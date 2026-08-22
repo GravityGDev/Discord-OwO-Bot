@@ -28,13 +28,11 @@ module.exports = new CommandInterface({
 			p.errorMsg(', Invalid user id');
 			return;
 		}
-		let sql =
-			'UPDATE IGNORE timeout SET penalty = 0' +
-			(hasTime ? ', prev_penalty = ' + time : '') +
-			' WHERE id = ' +
-			p.args[0] +
-			';';
-		await p.query(sql);
+
+		const timeout = await p.mongo.collection('timeout');
+		const changes = { penalty: 0 };
+		if (hasTime) changes.prev_penalty = time;
+		await timeout.updateMany({ id: String(p.args[0]) }, { $set: changes });
 
 		let user, guild;
 		if (
