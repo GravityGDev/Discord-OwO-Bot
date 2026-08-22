@@ -1,16 +1,26 @@
 const fs = require('fs');
 const path = require('path');
 
-const customPath = path.resolve(__dirname, '../../tokens/macro.js');
-const fallbackPath = path.resolve(__dirname, '../../secret/macro.js');
+const candidates = [
+	// Original production layout: tokens lives beside the repository directory.
+	path.resolve(__dirname, '../../../tokens/macro.js'),
+	// Also support a tokens directory inside a self-hosted checkout.
+	path.resolve(__dirname, '../../tokens/macro.js'),
+	// Bundled compatibility implementation used by this fork.
+	path.resolve(__dirname, '../../secret/macro.js'),
+];
 
-let macro;
-if (fs.existsSync(customPath)) {
-	macro = require(customPath);
-	console.log('[Macro] Loaded custom macro module.');
+const macroPath = candidates.find((candidate) => fs.existsSync(candidate));
+if (!macroPath) {
+	throw new Error('[Macro] macro.js was not found in any supported location.');
+}
+
+const macro = require(macroPath);
+const bundledPath = candidates[candidates.length - 1];
+if (macroPath === bundledPath) {
+	console.log('[Macro] Loaded bundled secret/macro.js.');
 } else {
-	macro = require(fallbackPath);
-	console.log('[Macro] Custom module is not configured; using bundled compatibility fallback.');
+	console.log('[Macro] Loaded custom macro module.');
 }
 
 module.exports = macro;
