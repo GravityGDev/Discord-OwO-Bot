@@ -24,8 +24,6 @@ const items = {
 		name: 'Common Ticket',
 		emoji: config.emoji.perkTicket.common,
 		column: 'unwrapped_common_tickets',
-		//tradeLimit: 1,
-		//giveOnly: true,
 		untradeable: true,
 		desc: 'You can use this item to redeem 1 month of common tier perks by typing `owo use 14`.',
 	},
@@ -43,13 +41,13 @@ const items = {
 		emoji: config.emoji.perkTicket.custom_pet,
 		column: 'custom_pet_tickets',
 		untradeable: true,
-		desc: `You can use this item to create one custom pet for yourself. You can choose the name, description, stats, and picture for the custom pet! Any users with a common perks or above will be able to hunt for your pet!`,
+		desc: 'You can use this item to create one custom pet for yourself. You can choose the name, description, stats, and picture for the custom pet! Any users with a common perks or above will be able to hunt for your pet!',
 	},
 };
 
-let lowestEventId = 22;
+const lowestEventId = 22;
 let eventItemId = lowestEventId;
-for (let key in event) {
+for (const key in event) {
 	const eventItem = event[key].item;
 	if (eventItem) {
 		items[eventItem.id] = {
@@ -65,38 +63,30 @@ for (let key in event) {
 }
 
 exports.getItems = async function (p) {
-	let sql = `SELECT ui.* FROM user_item ui INNER JOIN user u ON ui.uid = u.uid WHERE u.id = ${p.msg.author.id};`;
-	let result = await p.query(sql);
-	if (!result[0]) {
-		return {};
-	}
+	const uid = await p.global.getUid(p.msg.author.id);
+	const inventory = await p.mongo.collection('user_item');
+	const rows = await inventory.find({ uid, count: { $gt: 0 } }).toArray();
+	const inv = {};
 
-	let inv = {};
-
-	for (let i in result) {
-		const count = result[i].count;
-		const info = items[result[i].name];
-
+	for (const row of rows) {
+		const info = items[row.name];
 		if (!info) {
-			console.error('No item for: ' + result[i].name);
-		} else if (count > 0) {
-			inv[info.id] = {
-				id: info.id,
-				emoji: info.emoji,
-				count: count,
-			};
+			console.error('No item for: ' + row.name);
+			continue;
 		}
+		inv[info.id] = { id: info.id, emoji: info.emoji, count: row.count };
 	}
 	return inv;
 };
 
 exports.use = async function (id, p) {
-	let item = getById(id);
-	if (!(await checkInventory(item, p))) {
+	const item = getById(id);
+	if (!item || !(await checkInventory(item, p))) {
 		await p.errorMsg(', you do not have this item!');
 		return;
 	}
-	switch (item?.id) {
+
+	switch (item.id) {
 		case 10:
 		case 14:
 			await useCommonTicket(item, p);
@@ -108,7 +98,7 @@ exports.use = async function (id, p) {
 			await useCustomPetTicket(item, p);
 			break;
 		default:
-			if (eventItemId > item?.id && item?.id >= lowestEventId) {
+			if (eventItemId > item.id && item.id >= lowestEventId) {
 				await p.event.useItem.bind(p)(item);
 			} else {
 				await p.errorMsg(', this item does not exist! :(');
@@ -127,91 +117,76 @@ function getByName(name) {
 exports.getByName = getByName;
 
 exports.desc = async function (p, id) {
-	let item = getById(id);
+	const item = getById(id);
 	if (!item) {
 		p.errorMsg(', that item does not exist!');
 		return;
 	}
 
-	let sql = `SELECT ui.* FROM user_item ui INNER JOIN user u ON ui.uid = u.uid WHERE u.id = ${p.msg.author.id} AND ui.name = '${item.column}';`;
-	let result = await p.query(sql);
-	if (!result[0] || !result[0].count) {
+	const uid = await p.global.getUid(p.msg.author.id);
+	const inventory = await p.mongo.collection('user_item');
+	const row = await inventory.findOne({ uid, name: item.column });
+	if (!row?.count) {
 		p.errorMsg(', you do not have this item');
 		return;
 	}
 
-	let embed = {
+	const embed = {
 		color: p.config.embed_color,
-		fields: [
-			{
-				name: item.emoji + ' ' + item.name,
-				value: `**ID:** ${item.id}\n${item.desc}`,
-			},
-		],
+		fields: [{ name: `${item.emoji} ${item.name}`, value: `**ID:** ${item.id}\n${item.desc}` }],
 	};
-
 	if (item.giveOnly) {
-		embed.fields[0].value +=
-			'\n\n💸 **This item can only be gifted. You cannot trade this for cowoncy.**';
+		embed.fields[0].value += '\n\n💸 **This item can only be gifted. You cannot trade this for cowoncy.**';
 	}
-
-	if (item.untradeable) {
-		embed.fields[0].value += '\n\n🚫 **This item can not be traded.**';
-	}
-
-	if (item.tradeLimit) {
-		const afterMid = p.dateUtil.afterMidnight(result[0].daily_reset);
-		if (afterMid.after) {
-			embed.fields[0].value += `\n\n📑 **You can ${item.giveOnly ? 'gift' : 'trade'} this item ${
-				item.tradeLimit
-			} more times today.**`;
-		} else {
-			if (result[0].daily_count >= item.tradeLimit) {
-				embed.fields[0].value += `\n\n📑 **You have hit the max ${
-					item.giveOnly ? 'gift' : 'trade'
-				} limit for today.**`;
-			} else {
-				const diff = item.tradeLimit - result[0].daily_count;
-				embed.fields[0].value += `\n\n📑 **You can ${
-					item.giveOnly ? 'gift' : 'trade'
-				} this item ${diff} more times today.**`;
-			}
-		}
-	}
-
+	if (item.untradeable) embed.fields[0].value += '\n\n🚫 **This item can not be traded.**';
+	if (item.tradeLimit) appendTradeLimit(p, embed, item, row);
 	await p.send({ embed });
 };
 
-async function checkInventory(item, p) {
-	const uid = await p.global.getUid(p.msg.author.id);
-	const sql = `SELECT ui.count FROM user_item ui WHERE ui.uid = ${uid} AND ui.name = '${item.column}'`;
-	const result = await p.query(sql);
-	if (!result[0] || result[0].count <= 0) {
-		return false;
+function appendTradeLimit(p, embed, item, row) {
+	const afterMid = p.dateUtil.afterMidnight(row.daily_reset);
+	if (afterMid.after) {
+		embed.fields[0].value += `\n\n📑 **You can ${item.giveOnly ? 'gift' : 'trade'} this item ${
+			item.tradeLimit
+		} more times today.**`;
+		return;
 	}
-	return true;
+	const current = Number(row.daily_count || 0);
+	if (current >= item.tradeLimit) {
+		embed.fields[0].value += `\n\n📑 **You have hit the max ${
+			item.giveOnly ? 'gift' : 'trade'
+		} limit for today.**`;
+		return;
+	}
+	const diff = item.tradeLimit - current;
+	embed.fields[0].value += `\n\n📑 **You can ${item.giveOnly ? 'gift' : 'trade'} this item ${diff} more times today.**`;
+}
+
+async function checkInventory(item, p) {
+	if (!item) return false;
+	const uid = await p.global.getUid(p.msg.author.id);
+	const inventory = await p.mongo.collection('user_item');
+	const row = await inventory.findOne({ uid, name: item.column }, { projection: { count: 1 } });
+	return Number(row?.count || 0) > 0;
 }
 
 async function useCommonTicket(ticket, p) {
+	const uid = await p.global.getUid(p.msg.author.id);
+	const inventory = await p.mongo.collection('user_item');
 	let count = p.args[1];
 	if (!count) {
 		count = 1;
-	} else if (count == 'all') {
-		let result = await p.query(
-			`SELECT ui.count FROM user_item ui INNER JOIN user u ON ui.uid = u.uid WHERE u.id = ${p.msg.author.id} AND ui.name = '${ticket.column}'`
-		);
-		if (!result[0] || result[0].count <= 0) {
+	} else if (count === 'all') {
+		const row = await inventory.findOne({ uid, name: ticket.column });
+		if (!row || Number(row.count || 0) <= 0) {
 			p.errorMsg(', you do not have this item!', 3000);
 			return;
 		}
-		count = result[0].count;
+		count = Number(row.count);
 	} else if (p.global.isInt(count)) {
 		count = parseInt(count);
 	} else {
-		p.errorMsg(
-			', invalid arguments! Please specify the number of tickets you want to use >:c',
-			3000
-		);
+		p.errorMsg(', invalid arguments! Please specify the number of tickets you want to use >:c', 3000);
 		return;
 	}
 
@@ -221,41 +196,20 @@ async function useCommonTicket(ticket, p) {
 	}
 
 	const embed = {
-		description: `**${p.getName()}**, are you sure you want to redeem **${count}** ${
-			ticket.emoji
-		} **${ticket.name}${count > 1 ? 's' : ''}**?`,
+		description: `**${p.getName()}**, are you sure you want to redeem **${count}** ${ticket.emoji} **${
+			ticket.name
+		}${count > 1 ? 's' : ''}**?`,
 		color: p.config.embed_color,
 	};
-	const components = [
-		{
-			type: 1,
-			components: [
-				{
-					type: 2,
-					label: 'Use Ticket',
-					style: 3,
-					custom_id: interactionAgree,
-				},
-				{
-					type: 2,
-					label: 'Cancel',
-					style: 4,
-					custom_id: interactionDisagree,
-				},
-			],
-		},
-	];
+	const components = confirmationComponents();
 	const msg = await p.send({ embed, components });
 	const filter = (componentName, user) =>
 		[interactionAgree, interactionDisagree].includes(componentName) && user.id === p.msg.author.id;
-	const collector = p.interactionCollector.create(msg, filter, {
-		time: 900000,
-	});
+	const collector = p.interactionCollector.create(msg, filter, { time: 900000 });
 
 	collector.on('collect', async (componentName, user, ack) => {
 		collector.stop('done');
-		components[0].components[0].disabled = true;
-		components[0].components[1].disabled = true;
+		disableComponents(components);
 		embed.color = config.timeout_color;
 		if (componentName === interactionDisagree) {
 			embed.color = config.fail_color;
@@ -263,115 +217,115 @@ async function useCommonTicket(ticket, p) {
 			return;
 		}
 
-		const con = await p.startTransaction();
-		let date;
-		try {
-			// remove tickets
-			let sql = `UPDATE user_item INNER JOIN user ON user_item.uid = user.uid SET user_item.count = user_item.count - ${count}  WHERE user.id = ${p.msg.author.id} AND user_item.count >= ${count} AND user_item.name = '${ticket.column}';`;
-			let result = await con.query(sql);
-			if (!result.changedRows) {
-				await con.rollback();
-				try {
-					embed.description = `${
-						p.config.emoji.error
-					} **| ${p.getName()}**, you do not have enough tickets silly!`;
-					ack({ embed, components });
-				} catch (err) {
-					/* empty */
-				}
-				return;
-			}
-
-			// add months
-			sql = `SELECT user.uid, patreonMonths, patreonTimer, TIMESTAMPDIFF(MONTH,patreonTimer,NOW()) AS monthsPassed, patreonType FROM user LEFT JOIN patreons ON user.uid = patreons.uid WHERE id = ${p.msg.author.id}`;
-			result = await p.query(sql);
-			let uid = result[0].uid;
-			let months = result[0]?.patreonMonths || 0;
-			let monthsPassed = p.global.isInt(result[0]?.monthsPassed) ? result[0].monthsPassed : months;
-			const type = 1;
-
-			// reset timer or continue with current timer
-			if (months <= monthsPassed) {
-				sql = `INSERT INTO patreons (uid,patreonMonths,patreonType) VALUES (${uid},${count},${type}) ON DUPLICATE KEY UPDATE patreonType = ${type}, patreonMonths = ${count},patreonTimer = NOW();`;
-				date = new Date();
-				date.setMonth(date.getMonth() + count);
-			} else {
-				sql = `UPDATE patreons SET patreonType = ${type}, patreonMonths = patreonMonths + ${count} WHERE uid = ${uid};`;
-				date = new Date(result[0].patreonTimer);
-				date.setMonth(date.getMonth() + count + months);
-			}
-			date = date.toString();
-			result = await p.query(sql);
-
-			con.commit();
-		} catch (err) {
-			console.error(err);
-			p.errorMsg(', there was an error using your ticket! Please try again later.', 3000);
-			con.rollback();
+		const result = await redeemCommonTickets(p, uid, ticket.column, count);
+		if (!result.ok) {
+			embed.color = config.fail_color;
+			embed.description = result.notEnough
+				? `${p.config.emoji.error} **| ${p.getName()}**, you do not have enough tickets silly!`
+				: `${p.config.emoji.error} **| ${p.getName()}**, there was an error using your ticket!`;
+			await ack({ embed, components });
 			return;
 		}
+
 		embed.description = `**${p.getName()}**, your patreon has been extended by **${count} month${
 			count > 1 ? 's' : ''
-		}**!\nExpires on: **${date}**`;
+		}**!\nExpires on: **${result.expires.toString()}**`;
 		await ack({ embed, components });
 	});
 
 	collector.on('end', async function (reason) {
 		if (reason === 'idle') {
 			embed.color = config.timeout_color;
-			components[0].components[0].disabled = true;
-			components[0].components[1].disabled = true;
+			disableComponents(components);
 			await msg.edit({ content: 'This message is now inactive', embed, components });
 		}
 	});
 }
 
+async function redeemCommonTickets(p, uid, itemName, count) {
+	const inventory = await p.mongo.collection('user_item');
+	const patreons = await p.mongo.collection('patreons');
+	const session = await p.mongo.startSession();
+	let outcome = { ok: false };
+
+	try {
+		await session.withTransaction(async () => {
+			outcome = { ok: false };
+			const removed = await inventory.updateOne(
+				{ uid, name: itemName, count: { $gte: count } },
+				{ $inc: { count: -count } },
+				{ session }
+			);
+			if (!removed.modifiedCount) {
+				outcome = { ok: false, notEnough: true };
+				return;
+			}
+
+			const row = await patreons.findOne({ uid }, { session });
+			const months = Number(row?.patreonMonths || 0);
+			const monthsPassed = row?.patreonTimer ? fullMonthsBetween(new Date(row.patreonTimer), new Date()) : months;
+			let expires;
+			if (!row || months <= monthsPassed) {
+				const now = new Date();
+				await patreons.updateOne(
+					{ uid },
+					{ $set: { uid, patreonType: 1, patreonMonths: count, patreonTimer: now } },
+					{ upsert: true, session }
+				);
+				expires = addMonths(now, count);
+			} else {
+				await patreons.updateOne(
+					{ uid },
+					{ $set: { patreonType: 1 }, $inc: { patreonMonths: count } },
+					{ session }
+				);
+				expires = addMonths(new Date(row.patreonTimer), months + count);
+			}
+			outcome = { ok: true, expires };
+		});
+	} catch (err) {
+		console.error(err);
+		return { ok: false };
+	} finally {
+		await session.endSession();
+	}
+	return outcome;
+}
+
+function fullMonthsBetween(start, end) {
+	let months = (end.getFullYear() - start.getFullYear()) * 12 + end.getMonth() - start.getMonth();
+	const probe = new Date(start);
+	probe.setMonth(probe.getMonth() + months);
+	if (probe > end) months--;
+	return Math.max(0, months);
+}
+
+function addMonths(date, count) {
+	const result = new Date(date);
+	result.setMonth(result.getMonth() + count);
+	return result;
+}
+
 async function useGiveawayTicket(ticket, p) {
 	const embed = {
 		description:
-			`**${p.getName()}**, are you sure you want to redeem a ${ticket.emoji} **${
-				ticket.name
-			}** in this channel?` +
-			`\n\nAnyone in this channel will be able to enter the giveaway.` +
+			`**${p.getName()}**, are you sure you want to redeem a ${ticket.emoji} **${ticket.name}** in this channel?` +
+			'\n\nAnyone in this channel will be able to enter the giveaway.' +
 			`\n\n${config.emoji.warning} Selling this item for cowoncy, real money, or any item with monetary value will result in an immediate ban.`,
 		color: p.config.embed_color,
 	};
-	const components = [
-		{
-			type: 1,
-			components: [
-				{
-					type: 2,
-					label: 'Use Ticket',
-					style: 3,
-					custom_id: interactionAgree,
-				},
-				{
-					type: 2,
-					label: 'Cancel',
-					style: 4,
-					custom_id: interactionDisagree,
-				},
-			],
-		},
-	];
+	const components = confirmationComponents();
 	const msg = await p.send({ embed, components });
 	const filter = (componentName, user) =>
 		[interactionAgree, interactionDisagree].includes(componentName) && user.id === p.msg.author.id;
-	const collector = p.interactionCollector.create(msg, filter, {
-		time: 900000,
-	});
+	const collector = p.interactionCollector.create(msg, filter, { time: 900000 });
 
 	collector.on('collect', async (componentName, user, ack) => {
 		collector.stop('done');
-		components[0].components[0].disabled = true;
-		components[0].components[1].disabled = true;
+		disableComponents(components);
 		embed.color = config.timeout_color;
-		if (componentName === interactionDisagree) {
-			embed.color = config.fail_color;
-		}
+		if (componentName === interactionDisagree) embed.color = config.fail_color;
 		ack({ embed, components });
-
 		if (componentName === interactionAgree) {
 			await p.giveaway.createGiveaway.bind(p)(p.msg.channel.id, p.msg.author, true);
 		}
@@ -380,8 +334,7 @@ async function useGiveawayTicket(ticket, p) {
 	collector.on('end', async function (reason) {
 		if (reason === 'idle') {
 			embed.color = config.timeout_color;
-			components[0].components[0].disabled = true;
-			components[0].components[1].disabled = true;
+			disableComponents(components);
 			await msg.edit({ content: 'This message is now inactive', embed, components });
 		}
 	});
@@ -389,4 +342,21 @@ async function useGiveawayTicket(ticket, p) {
 
 async function useCustomPetTicket(ticket, p) {
 	await p.send('Unfinished');
+}
+
+function confirmationComponents() {
+	return [
+		{
+			type: 1,
+			components: [
+				{ type: 2, label: 'Use Ticket', style: 3, custom_id: interactionAgree },
+				{ type: 2, label: 'Cancel', style: 4, custom_id: interactionDisagree },
+			],
+		},
+	];
+}
+
+function disableComponents(components) {
+	components[0].components[0].disabled = true;
+	components[0].components[1].disabled = true;
 }
