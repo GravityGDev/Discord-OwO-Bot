@@ -8,17 +8,14 @@
 const CommandInterface = require('../../CommandInterface.js');
 const alterDaily = require('../patreon/alterDaily.js');
 const patreonUtil = require('../patreon/utils/patreonUtil.js');
-
-/*
- * Daily command.
- * Users can claim a daily once per day after midnight
- */
-
 const levels = require('../../../utils/levels.js');
+const mongoNumeric = require('../../../utils/mongoNumeric.js');
 const rings = require('../../../data/rings.json');
+
 const moneyEmoji = '💰';
 const surveyEmoji = '📝';
 const valEmoji = '💌';
+const legacyClaimDate = new Date('2017-01-01T00:00:00.000Z');
 
 module.exports = new CommandInterface({
 	alias: ['daily'],
@@ -41,469 +38,421 @@ module.exports = new CommandInterface({
 	bot: true,
 
 	execute: async function (p) {
-		const uid = await p.global.getUid(p.msg.author.id);
-		const { cowoncy, showAnnouncement, marriage, showSurvey } = await getUserInfo(p, uid);
-		const afterMid = p.dateUtil.afterMidnight(cowoncy?.daily);
+		const id = String(p.msg.author.id);
+		const uid = await p.global.getUid(id);
+		const supporter = await patreonUtil.getSupporterRank(p, p.msg.author);
+		const isValentines = p.event.isValentines();
+		const boxType = Math.random() < 0.5 ? 'lootbox' : 'crate';
+		const marriagePlan = {
+			baseType: Math.random() < 0.5 ? 'lootbox' : 'crate',
+			valentineType: Math.random() < 0.5 ? 'lootbox' : 'crate',
+		};
 
-		if (!cowoncy) {
-			await p.query(
-				`INSERT IGNORE INTO user (id, count) VALUES (${p.msg.author.id}, 0); INSERT IGNORE INTO cowoncy (id, money) VALUES (${p.msg.author.id}, 0);`
-			);
+		const claim = await claimDaily(p, id, uid, supporter, boxType);
+		if (claim.error) {
+			p.errorMsg(', there was an error claiming your daily. Please try again later.', 3000);
+			return;
 		}
 
-		// If it's not past midnight
-		if (afterMid && !afterMid.after) {
-			/* double check marriage */
-			await doubleCheckMarriage(p, afterMid, marriage, cowoncy);
+		const marriageReward = await settleMarriage(p, uid, isValentines, marriagePlan);
 
-			// Past midnight
+		if (!claim.claimed) {
+			if (marriageReward) {
+				await p.send(marriageReward.text.replace(/^\n/, ''));
+				return;
+			}
+			await sendCooldown(p, claim.cowoncy, claim.afterMid, claim.marriage);
+			return;
+		}
+
+		const { gain, extra, streak } = claim.rewards;
+		let text = `${moneyEmoji} **| ${p.getName()}**, Here is your daily **<:cowoncy:416043450337853441> ${gain} Cowoncy**!`;
+		const alterInfo = {
+			user: p.msg.author,
+			amount: gain,
+			streak: 0,
+		};
+
+		if (streak - 1 > 0) {
+			text += `\n${p.config.emoji.blank} **|** You're on a **${streak - 1} daily streak**!`;
+			alterInfo.streak = streak - 1;
+		}
+		if (extra > 0) {
+			text += `\n${p.config.emoji.blank} **|** You got an extra **${extra} Cowoncy** for being a <:patreon:449705754522419222> Patreon!`;
+			alterInfo.amount += extra;
+		}
+
+		if (boxType === 'lootbox') {
+			text += `\n**${p.config.emoji.lootbox} |** You received a **lootbox**!`;
+			alterInfo.box_emoji = p.config.emoji.lootbox;
+			alterInfo.box_name = 'lootbox';
 		} else {
-			const generalRewards = await getRewards(p, cowoncy, afterMid);
-			const boxRewards = getRandomBox(p, uid);
-			const marriageRewards = await checkMarriage(p, marriage);
-
-			const { sql, text, alterInfo } = finalizeText(
-				p,
-				uid,
-				generalRewards,
-				boxRewards,
-				marriageRewards,
-				showAnnouncement,
-				showSurvey,
-				afterMid
-			);
-			const cowoncySql = `UPDATE cowoncy SET money = money + ${
-				generalRewards.gain + generalRewards.extra
-			}, daily_streak = ${generalRewards.streak}, daily = ${afterMid.sql} WHERE id = ${
-				p.msg.author.id
-			} ${cowoncy ? ` AND daily_streak = ${cowoncy.daily_streak}` : ''} ;`;
-
-			await executeQuery(
-				p,
-				cowoncySql,
-				sql,
-				text,
-				showAnnouncement && cowoncy,
-				showSurvey,
-				generalRewards,
-				alterInfo
-			);
+			text += `\n**${p.config.emoji.crate} |** You received a **weapon crate**!`;
+			alterInfo.box_emoji = p.config.emoji.crate;
+			alterInfo.box_name = 'weapon crate';
 		}
+
+		if (marriageReward) {
+			text += marriageReward.text;
+			alterInfo.marriage = true;
+			Object.assign(alterInfo, marriageReward.alterInfo);
+		}
+
+		let components;
+		if (claim.showSurvey) {
+			const surveyText = `${surveyEmoji} **|** You have a survey available! Answer some questions for some cool rewards!`;
+			text += '\n' + surveyText;
+			alterInfo.surveyText = surveyText;
+			components = surveyComponents();
+		}
+
+		const time = formatCooldown(claim.afterMid);
+		alterInfo.cooldown = time;
+		text += `\n**⏱️ |** Your next daily is in: ${time}`;
+		if (claim.showAnnouncement) alterInfo.announcement = true;
+
+		const embed = announcementEmbed(p, claim.announcement);
+		let alterText = await alterDaily.alter(p, alterInfo);
+		if (alterText) {
+			if (typeof alterText === 'string') alterText = { content: alterText };
+			if (components) alterText.components = components;
+			await p.send(alterText);
+			if (claim.showAnnouncement && embed) await p.send({ embed });
+		} else {
+			await p.send({ content: text, embed, components });
+		}
+
+		p.logger.incr('cowoncy', gain + extra, { type: 'daily' }, p.msg);
+		await levels.giveUserXP(id, 100);
 	},
 });
 
-function finalizeText(
-	p,
-	uid,
-	{ streak, gain, extra },
-	boxRewards,
-	marriageRewards,
-	showAnnouncement,
-	showSurvey,
-	afterMid
-) {
-	let alterInfo = {
-		user: p.msg.author,
-		amount: gain,
-		streak: 0,
-	};
-	let sql = '';
+async function claimDaily(p, id, uid, supporter, boxType) {
+	const cowoncyCollection = await p.mongo.collection('cowoncy');
+	const lootbox = await p.mongo.collection('lootbox');
+	const crate = await p.mongo.collection('crate');
+	const announcements = await p.mongo.collection('announcement');
+	const userAnnouncements = await p.mongo.collection('user_announcement');
+	const surveys = await p.mongo.collection('survey');
+	const userSurveys = await p.mongo.collection('user_survey');
+	const session = await p.mongo.startSession();
+	let outcome;
 
-	if (showAnnouncement) {
-		sql += 'SELECT * FROM announcement ORDER BY aid DESC LIMIT 1;';
-		sql += `INSERT INTO user_announcement (uid, aid) VALUES (${uid}, (SELECT aid FROM announcement ORDER BY aid DESC LIMIT 1)) ON DUPLICATE KEY UPDATE aid = (SELECT aid FROM announcement ORDER BY aid DESC LIMIT 1);`;
-		alterInfo.announcement = true;
-	}
+	try {
+		await session.withTransaction(async () => {
+			outcome = undefined;
+			const cowoncy = await cowoncyCollection.findOne({ id }, { session });
+			const afterMid = p.dateUtil.afterMidnight(cowoncy?.daily);
+			const marriage = await getMarriageInfo(p, uid, session);
 
-	let text = `${moneyEmoji} **| ${p.getName()}**, Here is your daily **<:cowoncy:416043450337853441> ${gain} Cowoncy**!`;
+			if (!afterMid.after) {
+				outcome = { claimed: false, cowoncy, afterMid, marriage };
+				return;
+			}
 
-	if (streak - 1 > 0) {
-		text += `\n${p.config.emoji.blank} **|** You're on a **${streak - 1} daily streak**!`;
-		alterInfo.streak = streak - 1;
-	}
-	if (extra > 0) {
-		text += `\n${p.config.emoji.blank} **|** You got an extra **${extra} Cowoncy** for being a <:patreon:449705754522419222> Patreon!`;
-		alterInfo.amount += extra;
-	}
+			const rewards = getRewards(cowoncy, afterMid, supporter);
+			await mongoNumeric.add(
+				cowoncyCollection,
+				{ id },
+				'money',
+				rewards.gain + rewards.extra,
+				{ upsert: true, session },
+				{
+					id,
+					daily_streak: rewards.streak,
+					daily: afterMid.now,
+				}
+			);
 
-	if (boxRewards) {
-		text += boxRewards.text;
-		sql += boxRewards.sql;
-		alterInfo.box_emoji = boxRewards.emoji;
-		alterInfo.box_name = boxRewards.name;
-	}
+			await grantBox(lootbox, crate, id, uid, boxType, 1, session);
 
-	if (marriageRewards) {
-		sql += marriageRewards.sql;
-		text += marriageRewards.text;
-		alterInfo.marriage = true;
-		alterInfo = { ...alterInfo, ...marriageRewards.alterInfo };
-	}
-
-	if (showSurvey) {
-		sql += `INSERT INTO user_survey (uid, sid)
-			VALUES (${uid}, (SELECT sid FROM survey ORDER BY sid DESC LIMIT 1))
-			ON DUPLICATE KEY UPDATE
-				sid = (SELECT sid FROM survey ORDER BY sid DESC LIMIT 1),
-				question_number = 1,
-				in_progress = 0;`;
-		const surveyText = `${surveyEmoji} **|** You have a survey available! Answer some questions for some cool rewards!`;
-		alterInfo.surveyText = surveyText;
-		text += '\n' + surveyText;
-	}
-
-	const time = `${afterMid.hours}H ${afterMid.minutes}M ${afterMid.seconds}S`;
-	alterInfo.cooldown = time;
-	text += `\n**⏱️ |** Your next daily is in: ${time}`;
-
-	return { sql, text, alterInfo };
-}
-
-async function executeQuery(
-	p,
-	cowoncySql,
-	sql,
-	text,
-	showAnnouncement,
-	showSurvey,
-	{ gain, extra },
-	alterInfo
-) {
-	let rows = await p.query(cowoncySql);
-
-	if (!rows.changedRows) {
-		return p.errorMsg(', you already claimed your daily!');
-	}
-
-	rows = await p.query(sql);
-	p.logger.incr('cowoncy', gain + extra, { type: 'daily' }, p.msg);
-
-	let embed, components;
-	if (showAnnouncement && rows[0][0].url) {
-		embed = {
-			image: { url: rows[0][0].url },
-			color: p.config.embed_color,
-			timestamp: new Date(rows[0][0].adate),
-		};
-	}
-	if (showSurvey) {
-		components = [
-			{
-				type: 1,
-				components: [
-					{
-						type: 2,
-						label: 'Answer Survey',
-						style: 1,
-						custom_id: 'survey',
-						emoji: {
-							id: null,
-							name: surveyEmoji,
-						},
-					},
-				],
-			},
-		];
-	}
-	let alterText = await alterDaily.alter(p, alterInfo);
-	if (alterText) {
-		if (typeof alterText === 'string') {
-			alterText = {
-				content: alterText,
-			};
-		}
-		if (components) {
-			alterText.components = components;
-		}
-		p.send(alterText);
-		if (showAnnouncement) {
-			p.send({ embed });
-		}
-	} else {
-		p.send({ content: text, embed, components });
-	}
-
-	levels.giveUserXP(p.msg.author.id, 100);
-}
-
-async function getUserInfo(p, uid) {
-	let sql = `SELECT
-				daily,
-				daily_streak
-			FROM cowoncy
-			WHERE id = ${p.msg.author.id};`;
-	sql += `SELECT *
-			FROM user_announcement
-			WHERE
-				uid = ${uid}
-				AND (
-					aid = (SELECT aid FROM announcement ORDER BY aid DESC limit 1)
-					OR disabled = 1
-				);`;
-	sql += `SELECT 
-				u1.id AS id1, c1.daily AS daily1, c1.daily_streak AS streak1,
-				u2.id AS id2, c2.daily AS daily2, c2.daily_streak AS streak2,
-				marriage.* 
-			FROM marriage 
-				LEFT JOIN user AS u1 ON marriage.uid1 = u1.uid 
-					LEFT JOIN cowoncy AS c1 ON c1.id = u1.id
-				LEFT JOIN user AS u2 ON marriage.uid2 = u2.uid 
-					LEFT JOIN cowoncy AS c2 ON c2.id = u2.id
-				LEFT JOIN user AS temp ON marriage.uid1 = temp.uid OR marriage.uid2 = temp.uid
-			WHERE temp.id = ${p.msg.author.id};`;
-	sql += `SELECT *
-			FROM user_survey
-			WHERE
-				uid = ${uid}
-				AND (
-					in_progress = 1
-					OR (
-						sid = (SELECT sid FROM survey ORDER BY sid DESC limit 1)
-						AND is_done = 1
-					)
-				);`;
-	sql += 'SELECT sid FROM survey WHERE endDate > NOW() ORDER BY sid DESC limit 1';
-	const rows = await p.query(sql);
-
-	return {
-		cowoncy: rows[0][0],
-		showAnnouncement: !rows[1][0],
-		marriage: rows[2][0],
-		showSurvey: rows[4][0] ? !rows[3][0] : false,
-	};
-}
-
-async function doubleCheckMarriage(p, afterMid, marriage, cowoncy) {
-	// Exists in database?
-	if (marriage && marriage.daily1 && marriage.daily2) {
-		const afterMid = p.dateUtil.afterMidnight(marriage.claimDate);
-
-		if (afterMid.after) {
-			const u1Date = p.dateUtil.afterMidnight(marriage.daily1);
-			const u2Date = p.dateUtil.afterMidnight(marriage.daily2);
-
-			if (!u1Date.after && !u2Date.after) {
-				const totalGain = calculateMarriageBonus(p, marriage);
-				let sql = `UPDATE marriage SET claimDate = ${afterMid.sql}, dailies = dailies + 1 WHERE uid1 = ${marriage.uid1} AND uid2 = ${marriage.uid2} AND dailies = ${marriage.dailies};`;
-				const result = await p.query(sql);
-
-				if (result.changedRows) {
-					const so =
-						p.msg.author.id == marriage.id1
-							? await p.fetch.getUser(marriage.id2)
-							: await p.fetch.getUser(marriage.id1);
-					const ring = rings[marriage.rid];
-					let text = `${ring.emoji} **|** You and ${so ? so.username : 'your partner'} received ${
-						p.config.emoji.cowoncy
-					} **${totalGain} Cowoncy** and `;
-
-					sql = `UPDATE cowoncy SET money = money + ${totalGain} WHERE id IN (${marriage.id1}, ${marriage.id2});`;
-
-					let count = 1;
-					if (p.event.isValentines()) {
-						const item = {};
-						if (Math.random() < 0.5) {
-							sql += `INSERT INTO crate (uid, boxcount) VALUES
-										(${marriage.uid1}, 1), (${marriage.uid2}, 1)
-									ON DUPLICATE KEY UPDATE
-										boxcount = boxcount + 1;`;
-							item.emoji = p.config.emoji.crate;
-							item.name = 'Weapon Crate';
-						} else {
-							sql += `INSERT INTO lootbox (id, boxcount) VALUES
-										(${marriage.id1}, 1), (${marriage.id2}, 1)
-									ON DUPLICATE KEY UPDATE
-										boxcount = boxcount + 1;`;
-							item.emoji = p.config.emoji.lootbox;
-							item.name = 'Lootbox';
-						}
-						text =
-							`${valEmoji} **|** Happy Valentines! You got a ${item.emoji} **${item.name}** for being so cute together! <3\n` +
-							text;
-						count += 1;
-					}
-					if (Math.random() < 0.5) {
-						sql += `INSERT INTO lootbox (id, boxcount, claimcount, claim) VALUES (${marriage.id2}, ${count}, 0, '2017-01-01'), (${marriage.id2}, ${count}, 0, '2017-01-01') ON DUPLICATE KEY UPDATE boxcount = boxcount + ${count};`;
-						if (count > 1) {
-							text += `${p.config.emoji.lootbox} **${count} lootboxes**!`;
-						} else {
-							text += `a ${p.config.emoji.lootbox} **lootbox**!`;
-						}
-					} else {
-						sql += `INSERT INTO crate (uid, cratetype, boxcount, claimcount, claim) VALUES ((SELECT uid FROM user WHERE id = ${marriage.id1}), 0, ${count}, 0, '2017-01-01'), ((SELECT uid FROM user WHERE id = ${marriage.id2}), 0, ${count}, 0, '2017-01-01') ON DUPLICATE KEY UPDATE boxcount = boxcount + ${count};`;
-						if (count > 1) {
-							text += `${p.config.emoji.crate} **${count} weapon crates**!`;
-						} else {
-							text += `a ${p.config.emoji.crate} **weapon crate**!`;
-						}
-					}
-					await p.query(sql);
-					p.send(text);
-					return;
+			const announcement = await announcements.findOne({}, { sort: { aid: -1 }, session });
+			let showAnnouncement = false;
+			if (announcement) {
+				const state = await userAnnouncements.findOne({ uid }, { session });
+				showAnnouncement = !state?.disabled && state?.aid !== announcement.aid;
+				if (showAnnouncement) {
+					await userAnnouncements.updateOne(
+						{ uid },
+						{ $set: { uid, aid: announcement.aid } },
+						{ upsert: true, session }
+					);
 				}
 			}
-		}
+
+			const survey = await surveys.findOne(
+				{ endDate: { $gt: new Date() } },
+				{ sort: { sid: -1 }, session }
+			);
+			let showSurvey = false;
+			if (survey) {
+				const state = await userSurveys.findOne({ uid }, { session });
+				showSurvey = !state?.in_progress && !(state?.sid === survey.sid && state?.is_done);
+				if (showSurvey) {
+					await userSurveys.updateOne(
+						{ uid },
+						{
+							$set: {
+								uid,
+								sid: survey.sid,
+								question_number: 1,
+								in_progress: 0,
+								is_done: 0,
+							},
+						},
+						{ upsert: true, session }
+					);
+				}
+			}
+
+			outcome = {
+				claimed: true,
+				cowoncy,
+				afterMid: p.dateUtil.afterMidnight(afterMid.now),
+				rewards,
+				showAnnouncement,
+				announcement: showAnnouncement ? announcement : null,
+				showSurvey,
+				marriage,
+			};
+		});
+	} catch (err) {
+		console.error(err);
+		return { error: true };
+	} finally {
+		await session.endSession();
 	}
-	const time = `${afterMid.hours}H ${afterMid.minutes}M ${afterMid.seconds}S`;
+
+	return outcome || { error: true };
+}
+
+function getRewards(cowoncy, afterMid, supporter) {
+	let streak = Number(cowoncy?.daily_streak || 0);
+	if (afterMid?.withinDay) streak++;
+	else streak = 1;
+
+	let gain = 500 + Math.floor(Math.random() * 200);
+	gain += streak * 25;
+	if (gain > 5000) gain = 5000;
+
+	const extra = supporter?.benefitRank >= 3 ? gain : 0;
+	return { gain, extra, streak };
+}
+
+async function settleMarriage(p, uid, isValentines, plan) {
+	const marriages = await p.mongo.collection('marriage');
+	const cowoncy = await p.mongo.collection('cowoncy');
+	const lootbox = await p.mongo.collection('lootbox');
+	const crate = await p.mongo.collection('crate');
+	const session = await p.mongo.startSession();
+	let reward;
+
+	try {
+		await session.withTransaction(async () => {
+			reward = undefined;
+			const marriage = await getMarriageInfo(p, uid, session);
+			if (!marriage?.daily1 || !marriage?.daily2) return;
+			if (!p.dateUtil.afterMidnight(marriage.marriedDate).after) return;
+			if (p.dateUtil.afterMidnight(marriage.daily1).after) return;
+			if (p.dateUtil.afterMidnight(marriage.daily2).after) return;
+			if (!p.dateUtil.afterMidnight(marriage.claimDate).after) return;
+
+			const previousDailies = Number(marriage.dailies || 0);
+			const changed = await marriages.updateOne(
+				{ _id: marriage._id, dailies: marriage.dailies },
+				{ $set: { claimDate: new Date() }, $inc: { dailies: 1 } },
+				{ session }
+			);
+			if (!changed.modifiedCount) return;
+
+			const totalGain = calculateMarriageBonus(marriage, isValentines);
+			await mongoNumeric.add(cowoncy, { id: marriage.id1 }, 'money', totalGain, { session });
+			await mongoNumeric.add(cowoncy, { id: marriage.id2 }, 'money', totalGain, { session });
+
+			let count = 1;
+			if (isValentines) {
+				await grantPairBox(
+					lootbox,
+					crate,
+					marriage,
+					plan.valentineType,
+					1,
+					session
+				);
+				count++;
+			}
+			await grantPairBox(lootbox, crate, marriage, plan.baseType, count, session);
+
+			reward = {
+				...marriage,
+				totalGain,
+				previousDailies,
+				count,
+				baseType: plan.baseType,
+				valentineType: isValentines ? plan.valentineType : null,
+			};
+		});
+	} catch (err) {
+		console.error(err);
+		return;
+	} finally {
+		await session.endSession();
+	}
+
+	if (!reward) return;
+	return buildMarriageReward(p, uid, reward);
+}
+
+async function getMarriageInfo(p, uid, session) {
+	const marriages = await p.mongo.collection('marriage');
+	const users = await p.mongo.collection('user');
+	const cowoncy = await p.mongo.collection('cowoncy');
+	const options = session ? { session } : {};
+	const marriage = await marriages.findOne(
+		{ $or: [{ uid1: uid }, { uid2: uid }] },
+		options
+	);
+	if (!marriage) return;
+
+	const userRows = await users
+		.find({ uid: { $in: [marriage.uid1, marriage.uid2] } }, options)
+		.toArray();
+	const ids = new Map(userRows.map((row) => [row.uid, String(row.id)]));
+	const id1 = ids.get(marriage.uid1);
+	const id2 = ids.get(marriage.uid2);
+	if (!id1 || !id2) return { ...marriage };
+
+	const moneyRows = await cowoncy.find({ id: { $in: [id1, id2] } }, options).toArray();
+	const money = new Map(moneyRows.map((row) => [String(row.id), row]));
+	return {
+		...marriage,
+		id1,
+		id2,
+		daily1: money.get(id1)?.daily,
+		daily2: money.get(id2)?.daily,
+		streak1: Number(money.get(id1)?.daily_streak || 0),
+		streak2: Number(money.get(id2)?.daily_streak || 0),
+	};
+}
+
+function calculateMarriageBonus(marriage, isValentines) {
+	const totalStreak = Number(marriage.streak1 || 0) + Number(marriage.streak2 || 0);
+	let totalGain = Math.round(100 + Math.floor(Math.random() * 100) + totalStreak * 12.5);
+	if (totalGain > 1000) totalGain = 1000;
+	if (isValentines) totalGain *= 2;
+	return totalGain;
+}
+
+async function grantBox(lootbox, crate, id, uid, type, count, session) {
+	if (type === 'lootbox') {
+		await lootbox.updateOne(
+			{ id },
+			{
+				$inc: { boxcount: count },
+				$setOnInsert: { id, claimcount: 0, claim: legacyClaimDate, fbox: 0 },
+			},
+			{ upsert: true, session }
+		);
+		return;
+	}
+
+	await crate.updateOne(
+		{ uid, cratetype: 0 },
+		{
+			$inc: { boxcount: count },
+			$setOnInsert: { uid, cratetype: 0, claimcount: 0, claim: legacyClaimDate },
+		},
+		{ upsert: true, session }
+	);
+}
+
+async function grantPairBox(lootbox, crate, marriage, type, count, session) {
+	if (type === 'lootbox') {
+		await grantBox(lootbox, crate, marriage.id1, marriage.uid1, type, count, session);
+		await grantBox(lootbox, crate, marriage.id2, marriage.uid2, type, count, session);
+		return;
+	}
+	await grantBox(lootbox, crate, marriage.id1, marriage.uid1, type, count, session);
+	await grantBox(lootbox, crate, marriage.id2, marriage.uid2, type, count, session);
+}
+
+async function buildMarriageReward(p, uid, reward) {
+	const partnerId = uid === reward.uid1 ? reward.id2 : reward.id1;
+	let partner = await p.fetch.getUser(partnerId);
+	if (!partner) partner = { id: partnerId, username: 'your partner' };
+	const ring = rings[reward.rid] || { emoji: '💍', name: 'ring' };
+	const baseEmoji = reward.baseType === 'lootbox' ? p.config.emoji.lootbox : p.config.emoji.crate;
+	const baseName = reward.baseType === 'lootbox' ? 'lootbox' : 'weapon crate';
+
+	let text = '';
+	if (reward.valentineType) {
+		const valEmojiValue =
+			reward.valentineType === 'lootbox' ? p.config.emoji.lootbox : p.config.emoji.crate;
+		const valName = reward.valentineType === 'lootbox' ? 'Lootbox' : 'Weapon Crate';
+		text += `\n${valEmoji} **|** Happy Valentines! You got a ${valEmojiValue} **${valName}** for being so cute together! <3`;
+	}
+	text += `\n${ring.emoji}** |** You and ${partner.username} received ${
+		p.config.emoji.cowoncy
+	} **${reward.totalGain} Cowoncy** and `;
+	if (reward.count > 1) {
+		text += `${baseEmoji} **${reward.count} ${baseName === 'lootbox' ? 'lootboxes' : 'weapon crates'}**!`;
+	} else {
+		text += `a ${baseEmoji} **${baseName}**!`;
+	}
+
+	return {
+		text,
+		alterInfo: {
+			partner,
+			ring_emoji: ring.emoji,
+			ring_name: ring.name,
+			marriage_amount: reward.totalGain,
+			marriage_streak: reward.previousDailies,
+			marriage_box_emoji: baseEmoji,
+			marriage_box_name: baseName,
+		},
+	};
+}
+
+async function sendCooldown(p, cowoncy, afterMid, marriage) {
+	const time = formatCooldown(afterMid);
 	const text = `**⏱ |** Nu! **${p.getName()}**! You need to wait **${time}**`;
 	const alterText = await alterDaily.alter(p, {
 		cooldown: time,
 		isCooldown: true,
 		user: p.msg.author,
-		cowoncyInfo: cowoncy,
+		cowoncyInfo: cowoncy || { daily_streak: 0 },
 		marriageInfo: marriage,
 	});
-	p.send(alterText || text);
+	await p.send(alterText || text);
 }
 
-function calculateMarriageBonus(p, marriage) {
-	let totalStreak = marriage.streak1 + marriage.streak2;
-	let totalGain = Math.round(100 + Math.floor(Math.random() * 100) + totalStreak * 12.5);
-	if (totalGain > 1000) totalGain = 1000;
-	if (p.event.isValentines()) {
-		totalGain *= 2;
-	}
-	return totalGain;
+function formatCooldown(afterMid) {
+	return `${afterMid.hours}H ${afterMid.minutes}M ${afterMid.seconds}S`;
 }
 
-async function getRewards(p, cowoncy, afterMid) {
-	// Grab streak/patreon status
-	let streak = 0;
-	const supporter = await patreonUtil.getSupporterRank(p, p.msg.author);
-	let patreon = supporter.benefitRank >= 3;
-	if (cowoncy) {
-		streak = cowoncy.daily_streak;
-	}
-
-	//Calculate daily amount
-	let gain = 500 + Math.floor(Math.random() * 200);
-	let extra = 0;
-
-	// Reset streak if its over 1 whole day
-	if (afterMid && afterMid.withinDay) streak++;
-	else streak = 1;
-
-	// Calculate streak/patreon cowoncy
-	gain += streak * 25;
-	if (gain > 5000) gain = 5000;
-	if (patreon) extra = gain;
-
-	return { gain, extra, streak };
+function surveyComponents() {
+	return [
+		{
+			type: 1,
+			components: [
+				{
+					type: 2,
+					label: 'Answer Survey',
+					style: 1,
+					custom_id: 'survey',
+					emoji: { id: null, name: surveyEmoji },
+				},
+			],
+		},
+	];
 }
 
-function getRandomBox(p, uid) {
-	// Determine lootbox or crate
-	if (Math.random() < 0.5) {
-		return {
-			sql: `INSERT INTO lootbox (id, boxcount, claimcount, claim) VALUES (${p.msg.author.id}, 1, 0, '2017-01-01') ON DUPLICATE KEY UPDATE boxcount = boxcount + 1;`,
-			text: `\n**${p.config.emoji.lootbox} |** You received a **lootbox**!`,
-			emoji: p.config.emoji.lootbox,
-			name: 'lootbox',
-		};
-	} else {
-		return {
-			sql: `INSERT INTO crate(uid, cratetype, boxcount, claimcount, claim) VALUES (${uid}, 0, 1, 0, '2017-01-01') ON DUPLICATE KEY UPDATE boxcount = boxcount + 1;`,
-			text: `\n**${p.config.emoji.crate} |** You received a **weapon crate**!`,
-			emoji: p.config.emoji.crate,
-			name: 'weapon crate',
-		};
-	}
-}
-
-async function checkMarriage(p, marriage) {
-	if (!marriage || !marriage.daily1 || !marriage.daily2) {
-		return;
-	}
-
-	// daily can only be claimed the day after married
-	let afterMid = p.dateUtil.afterMidnight(marriage.marriedDate);
-	if (!afterMid.after) {
-		return;
-	}
-
-	/* eslint-disable-next-line */
-	let soID, soStreak, soDaily;
-	if (p.msg.author.id == marriage.id1) {
-		soID = marriage.id2;
-		/* eslint-disable-next-line */
-		soStreak = marriage.streak2;
-		soDaily = marriage.daily2;
-	} else {
-		soID = marriage.id1;
-		/* eslint-disable-next-line */
-		soStreak = marriage.streak1;
-		soDaily = marriage.daily1;
-	}
-
-	// If the parter has claimed their daily.. bonuses!
-	afterMid = p.dateUtil.afterMidnight(soDaily);
-	if (afterMid.after) {
-		return;
-	}
-
-	const totalGain = calculateMarriageBonus(p, marriage);
-	let sql = `UPDATE cowoncy SET money = money + ${totalGain} WHERE id IN (${soID}, ${p.msg.author.id});`;
-	sql += `UPDATE marriage SET claimDate = ${afterMid.sql}, dailies = dailies + 1 WHERE uid1 = ${marriage.uid1} AND uid2 = ${marriage.uid2};`;
-
-	let so = await p.fetch.getUser(soID);
-	let ring = rings[marriage.rid];
-	let text = `\n${ring.emoji}** |** You and ${
-		so ? so.username : 'your partner'
-	} received <:cowoncy:416043450337853441> **${totalGain} Cowoncy** and `;
-
-	let count = 1;
-	if (p.event.isValentines()) {
-		const item = {};
-		if (Math.random() < 0.5) {
-			sql += `INSERT INTO crate (uid, boxcount) VALUES
-					(${marriage.uid1}, 1), (${marriage.uid2}, 1)
-				ON DUPLICATE KEY UPDATE
-					boxcount = boxcount + 1;`;
-			item.emoji = p.config.emoji.crate;
-			item.name = 'Weapon Crate';
-		} else {
-			sql += `INSERT INTO lootbox (id, boxcount) VALUES
-					(${marriage.id1}, 1), (${marriage.id2}, 1)
-				ON DUPLICATE KEY UPDATE
-					boxcount = boxcount + 1;`;
-			item.emoji = p.config.emoji.lootbox;
-			item.name = 'Lootbox';
-		}
-		text =
-			`\n${valEmoji} **|** Happy Valentines! You got a ${item.emoji} **${item.name}** for being so cute together! <3` +
-			text;
-		count += 1;
-	}
-	const alterInfo = {
-		partner: so,
-		ring_emoji: ring.emoji,
-		ring_name: ring.name,
-		marriage_amount: totalGain,
-		marriage_streak: marriage.dailies,
-	};
-	if (Math.random() < 0.5) {
-		sql += `INSERT INTO lootbox (id, boxcount, claimcount, claim) VALUES (${p.msg.author.id}, ${count}, 0, '2017-01-01'), (${soID}, ${count}, 0, '2017-01-01') ON DUPLICATE KEY UPDATE boxcount = boxcount + ${count};`;
-		if (count > 1) {
-			text += `${p.config.emoji.lootbox} **${count} lootboxes**!`;
-		} else {
-			text += `a ${p.config.emoji.lootbox} **lootbox**!`;
-		}
-		alterInfo.marriage_box_emoji = p.config.emoji.lootbox;
-		alterInfo.marriage_box_name = 'lootbox';
-	} else {
-		sql += `INSERT INTO crate (uid, cratetype, boxcount, claimcount, claim) VALUES (${marriage.uid1}, 0, ${count}, 0, '2017-01-01'), (${marriage.uid2}, 0, ${count}, 0, '2017-01-01') ON DUPLICATE KEY UPDATE boxcount = boxcount + ${count};`;
-		if (count > 1) {
-			text += `${p.config.emoji.crate} **${count} weapon crates**!`;
-		} else {
-			text += `a ${p.config.emoji.crate} **weapon crate**!`;
-		}
-		alterInfo.marriage_box_emoji = p.config.emoji.crate;
-		alterInfo.marriage_box_name = 'weapon crate';
-	}
-
+function announcementEmbed(p, announcement) {
+	if (!announcement?.url) return undefined;
 	return {
-		sql,
-		text,
-		alterInfo,
+		image: { url: announcement.url },
+		color: p.config.embed_color,
+		timestamp: new Date(announcement.adate),
 	};
 }
