@@ -8,154 +8,6 @@
 const levels = require('../../../../utils/levels.js');
 const mongoNumeric = require('../../../../utils/mongoNumeric.js');
 
-/*
- * Legacy SQL implementation. Kept temporarily for command domains that have
- * not been migrated yet. New code should use canGiveMongo/applyGiveLimitsMongo.
- */
-exports.canGive = async function (
-	sender,
-	receiver,
-	amount,
-	con,
-	{ skipCowoncyCheck, isTransaction } = {}
-) {
-	const senderLimit = await checkSender.bind(this)(sender, amount, con, {
-		skipCowoncyCheck,
-		isTransaction,
-	});
-	if (senderLimit.error) return senderLimit;
-
-	const receiverLimit = await checkReceiver.bind(this)(receiver, amount, con, { isTransaction });
-	if (receiverLimit.error) return receiverLimit;
-
-	return {
-		sql: senderLimit.sql + receiverLimit.sql,
-	};
-};
-
-async function checkSender(user, amount, con, { skipCowoncyCheck, isTransaction }) {
-	let sql = `SELECT c.money, cl.send, cl.reset
-			FROM cowoncy c
-				LEFT JOIN cowoncy_limit cl ON c.id = cl.id
-			WHERE c.id = ${user.id}
-				AND c.money >= ${amount} ${isTransaction ? 'FOR UPDATE' : ''};`;
-	if (skipCowoncyCheck) {
-		sql = `SELECT cl.send, cl.reset
-			FROM cowoncy_limit cl
-			WHERE cl.id = ${user.id} ${isTransaction ? 'FOR UPDATE' : ''};`;
-	}
-	let result = await con.query(sql);
-	if (!skipCowoncyCheck && (!result[0] || result[0].money < amount)) {
-		return {
-			error: ", you silly hooman! You don't have enough cowoncy!",
-			none: true,
-		};
-	}
-
-	const afterMid = this.dateUtil.afterMidnight(result[0]?.reset);
-	const limit = (await getUserLimits(user.id)).send;
-
-	if (afterMid.after) {
-		if (amount > limit) {
-			return {
-				error: `, you can only send **${this.global.toFancyNum(limit)}** more cowoncy today!`,
-				limit: this.global.toFancyNum(limit),
-				senderlimit: true,
-			};
-		}
-		return {
-			sql: `INSERT INTO cowoncy_limit (id, send, reset) VALUES (${user.id}, ${amount}, ${afterMid.sql}) ON DUPLICATE KEY UPDATE send = ${amount}, receive = 0, reset = ${afterMid.sql};`,
-		};
-	}
-
-	if (result[0].send > limit) {
-		return {
-			error: `, you already hit your daily cowoncy give limit of: **${this.global.toFancyNum(
-				result[0].send
-			)}**`,
-			limit: this.global.toFancyNum(result[0].send),
-			senderoverlimit: true,
-		};
-	} else if (result[0].send + amount > limit) {
-		const diff = limit - result[0].send;
-		if (diff > 0) {
-			return {
-				error: `, you can only send **${this.global.toFancyNum(diff)}** more cowoncy today!`,
-				limit: this.global.toFancyNum(limit),
-				limit_diff: this.global.toFancyNum(diff),
-				senderlimit: true,
-			};
-		} else {
-			return {
-				error: ', you cannot send any more cowoncy today.',
-				limit: this.global.toFancyNum(result[0].send),
-				senderoverlimit: true,
-			};
-		}
-	}
-	return {
-		sql: `UPDATE cowoncy_limit SET send = send + ${amount} WHERE id = ${user.id};`,
-	};
-}
-
-async function checkReceiver(user, amount, con, { isTransaction }) {
-	let sql = `SELECT cl.receive, cl.reset
-			FROM cowoncy_limit cl
-			WHERE cl.id = ${user.id}
-			${isTransaction ? 'FOR UPDATE' : ''};`;
-	let result = await con.query(sql);
-	const afterMid = this.dateUtil.afterMidnight(result[0]?.reset);
-	const limit = (await getUserLimits(user.id)).receive;
-
-	if (afterMid.after) {
-		if (amount > limit) {
-			return {
-				error: `, **${user.username}** can only receive **${this.global.toFancyNum(
-					limit
-				)}** more cowoncy today!`,
-				limit: this.global.toFancyNum(limit),
-				receivelimit: true,
-			};
-		}
-		return {
-			sql: `INSERT INTO cowoncy_limit (id, receive, reset) VALUES (${user.id}, ${amount}, ${afterMid.sql}) ON DUPLICATE KEY UPDATE send = 0, receive = ${amount}, reset = ${afterMid.sql};`,
-		};
-	}
-
-	if (result[0].receive > limit) {
-		return {
-			error: `, **${
-				user.username
-			}** has already received the daily receive limit of: **${this.global.toFancyNum(
-				result[0].receive
-			)}**`,
-			limit: this.global.toFancyNum(result[0].receive),
-			receiveoverlimit: true,
-		};
-	} else if (result[0].receive + amount > limit) {
-		const diff = limit - result[0].receive;
-		if (diff > 0) {
-			return {
-				error: `, **${user.username}** can only receive **${this.global.toFancyNum(
-					diff
-				)}** more cowoncy today!`,
-				limit: this.global.toFancyNum(limit),
-				limit_diff: this.global.toFancyNum(diff),
-				receivelimit: true,
-			};
-		} else {
-			return {
-				error: `, **${user.username}** cannot receive any more cowoncy today.`,
-				limit: this.global.toFancyNum(result[0].receive),
-				receiveoverlimit: true,
-			};
-		}
-	}
-	return {
-		sql: `UPDATE cowoncy_limit SET receive = receive + ${amount} WHERE id = ${user.id};`,
-	};
-}
-
 const getUserLimits = (exports.getUserLimits = async function (id) {
 	const lvl = (await levels.getUserLevel(id)).level;
 	const tens = Math.floor(lvl / 10);
@@ -181,7 +33,9 @@ function limitError(type, user, current, amount, limit, global) {
 			};
 		}
 		return {
-			error: `, **${user.username}** has already received the daily receive limit of: **${global.toFancyNum(current)}**`,
+			error: `, **${user.username}** has already received the daily receive limit of: **${global.toFancyNum(
+				current
+			)}**`,
 			limit: global.toFancyNum(current),
 			receiveoverlimit: true,
 		};
@@ -224,8 +78,8 @@ function limitError(type, user, current, amount, limit, global) {
 }
 
 /*
- * Mongo-native check used by migrated economy commands. The returned mutation
- * plan is applied inside the same transaction as the balance movement.
+ * Mongo-native check used by economy commands. The returned mutation plan is
+ * applied inside the same transaction as the balance movement.
  */
 exports.canGiveMongo = async function (
 	sender,
@@ -239,7 +93,6 @@ exports.canGiveMongo = async function (
 	const cowoncy = await this.mongo.collection('cowoncy');
 	const limits = await this.mongo.collection('cowoncy_limit');
 
-	// MongoDB does not support parallel operations on the same transaction session.
 	let senderBalance = null;
 	if (!skipCowoncyCheck) {
 		senderBalance = await cowoncy.findOne(
@@ -344,7 +197,7 @@ exports.applyGiveLimitsMongo = async function (plan, { session } = {}) {
 			  }
 		: { id: plan.mongo.receiver.id, receive: plan.mongo.receiver.next };
 
-	// Keep transaction operations sequential; Promise.all on one session is unsupported.
+	// Keep transaction operations sequential; Mongo does not support parallel work on one session.
 	await limits.updateOne({ id: plan.mongo.sender.id }, { $set: senderSet }, options);
 	await limits.updateOne({ id: plan.mongo.receiver.id }, { $set: receiverSet }, options);
 };
@@ -352,10 +205,10 @@ exports.applyGiveLimitsMongo = async function (plan, { session } = {}) {
 /*
 for (let lvl = 1; lvl < 60; lvl++) {
 	const tens = Math.floor(lvl / 10);
-	const limit = 50000 + (lvl * 14000) + (tens * 5000000);
+	const limit = 50000 + lvl * 14000 + tens * 5000000;
 
 	const send = limit;
-	const receive = Math.ceil(limit * ((tens/2) + 1))
+	const receive = Math.ceil(limit * (tens / 2 + 1));
 
 	console.log(`[${lvl}] ${send} | ${receive}`);
 }
