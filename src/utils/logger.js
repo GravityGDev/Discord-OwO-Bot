@@ -24,25 +24,6 @@ exports.value = function (name, amount, tags) {
 	else if (amount < 0) log.decrementBy('owo.' + name, Math.abs(amount), tags);
 };
 
-/***** winston *****/
-/*
-const winston = require('winston');
-const logger = winston.createLogger({
-	level:'verbose',
-	transports:[new winston.transports.File({filename:'combined.log'})]
-});
-
-winstonLogger = {
-	error:function(msg){msg.time=new Date();logger.error(msg)},
-	warn:function(msg){msg.time=new Date();logger.warn(msg)},
-	info:function(msg){msg.time=new Date();logger.info(msg)},
-	verbose:function(msg){msg.time=new Date();logger.verbose(msg)},
-	debug:function(msg){msg.time=new Date();logger.debug(msg)},
-}
-
-exports.log = winstonLogger;
-*/
-
 /***** StatsD *****/
 const SDC = require('statsd-client');
 const sdc = new SDC({
@@ -83,130 +64,76 @@ const decr = (exports.decr = function (name, amount = -1, tags = {}, msg) {
 });
 
 const request = require('request');
-// Only display this error once per 5 minutes
 let influxErrorShown = false;
-setTimeout(() => {
+setInterval(() => {
 	influxErrorShown = false;
-}, 5 * 60 * 60 * 1000);
-exports.command = function (command, msg) {
-	const body = {
-		password: process.env.INFLUXDB_PASS,
-		command: command,
-		user: msg.author.id,
-	};
+}, 5 * 60 * 1000).unref?.();
 
+function influxEnabled() {
+	return Boolean(process.env.INFLUXDB_HOST && process.env.INFLUXDB_PASS);
+}
+
+function postInflux(path, body) {
+	if (!influxEnabled()) return;
 	request(
 		{
 			method: 'POST',
-			uri: `${process.env.INFLUXDB_HOST}/command`,
+			uri: `${process.env.INFLUXDB_HOST}${path}`,
 			json: true,
-			body: body,
+			body,
 		},
 		function (err) {
 			if (err && !influxErrorShown) {
 				console.error('InfluxDB is inactive. Log upload will not work.');
+				console.error(err);
 				influxErrorShown = true;
-				throw err;
 			}
 		}
 	);
+}
+
+exports.command = function (command, msg) {
+	postInflux('/command', {
+		password: process.env.INFLUXDB_PASS,
+		command,
+		user: msg.author.id,
+	});
 };
 
 exports.logstash = function (command, p) {
-	const body = {
+	postInflux('/metric', {
 		password: process.env.INFLUXDB_PASS,
 		user: p.msg.author.id,
-		command: command,
+		command,
 		text: p.msg.content,
-		guild: p.msg.channel.guild?.id | 'dm',
-	};
-
-	request(
-		{
-			method: 'POST',
-			uri: `${process.env.INFLUXDB_HOST}/metric`,
-			json: true,
-			body: body,
-		},
-		function (err) {
-			if (err && !influxErrorShown) {
-				console.error('InfluxDB is inactive. Log upload will not work.');
-				influxErrorShown = true;
-				throw err;
-			}
-		}
-	);
+		guild: p.msg.channel.guild?.id || 'dm',
+	});
 };
 
 exports.logstashBanned = function (command, p) {
-	const body = {
+	postInflux('/metric', {
 		password: process.env.INFLUXDB_PASS,
 		user: p.msg.author.id,
 		bannedCommand: command,
 		text: p.msg.content,
-		guild: p.msg.channel.guild.id,
-	};
-
-	request(
-		{
-			method: 'POST',
-			uri: `${process.env.INFLUXDB_HOST}/metric`,
-			json: true,
-			body: body,
-		},
-		function (err) {
-			if (err && !influxErrorShown) {
-				console.error('InfluxDB is inactive. Log upload will not work.');
-				influxErrorShown = true;
-				throw err;
-			}
-		}
-	);
+		guild: p.msg.channel.guild?.id || 'dm',
+	});
 };
 
 exports.logstashCaptcha = function (metric) {
-	metric.password = process.env.INFLUXDB_PASS;
-
-	request(
-		{
-			method: 'POST',
-			uri: `${process.env.INFLUXDB_HOST}/captcha`,
-			json: true,
-			body: metric,
-		},
-		function (err) {
-			if (err && !influxErrorShown) {
-				console.error('InfluxDB is inactive. Log upload will not work.');
-				influxErrorShown = true;
-				throw err;
-			}
-		}
-	);
+	postInflux('/captcha', {
+		...metric,
+		password: process.env.INFLUXDB_PASS,
+	});
 };
 
 exports.logstashQos = function (metricKey, metric = {}) {
-	metric.password = process.env.INFLUXDB_PASS;
-	metric.metric = metricKey;
-	metric.server = process.env.SHARDER_SERVER;
-	metric.shards = global.getShardString();
-
-	if (config.debug) {
-		metric.debug = true;
-	}
-
-	request(
-		{
-			method: 'POST',
-			uri: `${process.env.INFLUXDB_HOST}/qos`,
-			json: true,
-			body: metric,
-		},
-		function (err) {
-			if (err && !influxErrorShown) {
-				console.error('InfluxDB is inactive. Log upload will not work.');
-				influxErrorShown = true;
-				throw err;
-			}
-		}
-	);
+	postInflux('/qos', {
+		...metric,
+		password: process.env.INFLUXDB_PASS,
+		metric: metricKey,
+		server: process.env.SHARDER_SERVER,
+		shards: global.getShardString(),
+		...(config.debug ? { debug: true } : {}),
+	});
 };
