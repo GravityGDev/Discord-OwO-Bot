@@ -29,11 +29,8 @@ async function parseUsers(p) {
 			.split(/\s+/gi);
 		try {
 			let result = await giveTicket(p, args[0], args[1], args[2]);
-			if (result) {
-				success += `\`[${result.count}] [${result.user.id}] ${p.getUniqueName(result.user)}\`\n`;
-			} else {
-				failed += `\`failed for [${args.join(', ')}]\`\n`;
-			}
+			if (result) success += `\`[${result.count}] [${result.user.id}] ${p.getUniqueName(result.user)}\`\n`;
+			else failed += `\`failed for [${args.join(', ')}]\`\n`;
 		} catch (err) {
 			console.error(err);
 			failed += `failed for [${args.join(', ')}]\n`;
@@ -43,25 +40,21 @@ async function parseUsers(p) {
 }
 
 async function giveTicket(p, id, count = 1, type = 1) {
-	//Parse id
 	if (!p.global.isUser(id) && !p.global.isUser('<@' + id + '>')) {
 		p.errorMsg(', Invalid user id: ' + id);
 		return;
 	}
-
-	// Parses count
 	if (count && p.global.isInt(count)) count = parseInt(count);
 	if (!count) {
 		p.errorMsg(', invalid # of tickets');
 		return;
 	}
-
-	// Parse type
 	if (type && p.global.isInt(type)) type = parseInt(type);
 	if (!type || type > 1 || type < 1) {
 		p.errorMsg(', wrong ticket type for ' + id);
 		return;
 	}
+
 	let name, emoji;
 	switch (type) {
 		case 1:
@@ -75,20 +68,17 @@ async function giveTicket(p, id, count = 1, type = 1) {
 			return;
 	}
 
-	// Fetch uid first
 	const uid = await p.global.getUid(id);
+	const items = await p.mongo.collection('user_item');
+	await items.updateOne(
+		{ uid, name: type },
+		{ $inc: { count }, $setOnInsert: { uid, name: type } },
+		{ upsert: true }
+	);
 
-	// Query result
-	let sql = `INSERT INTO user_item (uid, name, count) VALUES (${uid}, '${type}', ${count}) ON DUPLICATE KEY update count = count + ${count};`;
-	await p.query(sql);
-
-	// Send msgs
 	let user;
 	if (count > 0)
-		user = await p.sender.msgUser(
-			id,
-			`${emoji} **|** Thank you! You received **${count} ${emoji} ${name}**!`
-		);
+		user = await p.sender.msgUser(id, `${emoji} **|** Thank you! You received **${count} ${emoji} ${name}**!`);
 	else
 		user = await p.sender.msgUser(
 			id,
