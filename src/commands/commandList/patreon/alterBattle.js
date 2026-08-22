@@ -136,8 +136,9 @@ async function checkDb(p, id, text, info) {
 		enemyTeam: text.fields[1].name,
 	};
 
-	const sql = `SELECT alterbattle.* from alterbattle INNER JOIN user ON alterbattle.uid = user.uid WHERE user.id = ${p.msg.author.id} AND alterbattle.type = '${type}'`;
-	const result = (await p.query(sql))[0];
+	const uid = await p.global.getUid(p.msg.author.id);
+	const alterBattle = await p.mongo.collection('alterbattle');
+	const result = await alterBattle.findOne({ uid, type });
 	if (!result || !result.updated_at) return;
 
 	let embed = {

@@ -11,7 +11,8 @@ const animalUtil = require('../../zoo/animalUtil.js');
 const alterWeapon = require('../../patreon/alterWeapon.js');
 const alterWeaponDisplay = require('../../patreon/alterWeaponDisplay.js');
 const global = require('../../../../utils/global.js');
-const mysql = require('../../../../botHandlers/mysqlHandler.js');
+const mongo = require('../../../../utils/mongo.js');
+const mongoNumeric = require('../../../../utils/mongoNumeric.js');
 
 WeaponInterface.setWeaponUtil(this);
 teamUtil.setWeaponUtil(this);
@@ -62,6 +63,170 @@ setTimeout(() => {
 	}
 }, 0);
 
+async function getUserUid(id) {
+	const users = await mongo.collection('user');
+	const user = await users.findOne({ id: String(id) }, { projection: { uid: 1 } });
+	return user?.uid;
+}
+
+function uniqueValues(values) {
+	return [...new Set(values.filter((value) => value !== null && value !== undefined))];
+}
+
+async function hydrateWeaponRows(weaponDocs) {
+	if (!weaponDocs?.length) return [];
+
+	const uwids = uniqueValues(weaponDocs.map((weapon) => weapon.uwid));
+	const uids = uniqueValues(weaponDocs.map((weapon) => weapon.uid));
+	const pids = uniqueValues(weaponDocs.map((weapon) => weapon.pid));
+	const passiveCollection = await mongo.collection('user_weapon_passive');
+	const killCollection = await mongo.collection('user_weapon_kills');
+	const animalCollection = await mongo.collection('animal');
+	const userCollection = await mongo.collection('user');
+
+	const [passives, kills, animals, users] = await Promise.all([
+		uwids.length ? passiveCollection.find({ uwid: { $in: uwids } }).toArray() : [],
+		uwids.length ? killCollection.find({ uwid: { $in: uwids } }).toArray() : [],
+		pids.length ? animalCollection.find({ pid: { $in: pids } }).toArray() : [],
+		uids.length
+			? userCollection.find({ uid: { $in: uids } }, { projection: { uid: 1, id: 1 } }).toArray()
+			: [],
+	]);
+
+	const passivesByWeapon = new Map();
+	for (const passive of passives) {
+		const key = String(passive.uwid);
+		if (!passivesByWeapon.has(key)) passivesByWeapon.set(key, []);
+		passivesByWeapon.get(key).push(passive);
+	}
+	for (const list of passivesByWeapon.values()) {
+		list.sort((a, b) => Number(a.pcount || 0) - Number(b.pcount || 0));
+	}
+
+	const killsByWeapon = new Map(kills.map((kill) => [String(kill.uwid), kill]));
+	const animalsByPid = new Map(animals.map((animal) => [String(animal.pid), animal]));
+	const usersByUid = new Map(users.map((user) => [String(user.uid), String(user.id)]));
+	const rows = [];
+
+	for (const weapon of weaponDocs) {
+		const key = String(weapon.uwid);
+		const animal =
+			weapon.pid === null || weapon.pid === undefined
+				? null
+				: animalsByPid.get(String(weapon.pid));
+		const tracker = killsByWeapon.get(key);
+		const base = {
+			id: usersByUid.get(String(weapon.uid)),
+			uwid: weapon.uwid,
+			wid: weapon.wid,
+			stat: String(weapon.stat || ''),
+			rrcount: Number(weapon.rrcount || 0),
+			rrattempt: Number(weapon.rrattempt || 0),
+			wear: Number(weapon.wear || 0),
+			favorite: Number(weapon.favorite || 0),
+			pid: weapon.pid ?? null,
+			tt: tracker ? weapon.uwid : null,
+			kills: Number(tracker?.kills || 0),
+			name: animal?.name,
+			nickname: animal?.nickname,
+		};
+		const weaponPassives = passivesByWeapon.get(key) || [];
+		if (!weaponPassives.length) {
+			rows.push(base);
+			continue;
+		}
+		for (const passive of weaponPassives) {
+			rows.push({
+				...base,
+				pcount: Number(passive.pcount || 0),
+				wpid: passive.wpid,
+				pstat: String(passive.stat || ''),
+			});
+		}
+	}
+	return rows;
+}
+
+function buildWeaponFilter(uid, wid, widList) {
+	const filter = { uid };
+	const requested = wid !== undefined && wid !== null ? [wid] : widList;
+	if (requested?.length) {
+		const values = requested.map((value) => Number(value)).filter(Number.isFinite);
+		if (values.length) filter.wid = { $in: values };
+	}
+	return filter;
+}
+
+function weaponSort(sort) {
+	switch (sort) {
+		case 'rarity':
+			return { avg: -1, uwid: -1 };
+		case 'type':
+			return { wid: -1, avg: -1, uwid: -1 };
+		case 'equipped':
+			return { pid: -1, uwid: -1 };
+		case 'favorite':
+			return { favorite: -1, avg: -1, uwid: -1 };
+		case 'wear':
+			return { wear: -1, avg: -1, uwid: -1 };
+		default:
+			return { uwid: -1 };
+	}
+}
+
+async function removeWeaponsAndCredit(p, uid, candidateUwids, priceEach) {
+	candidateUwids = uniqueValues(candidateUwids.map(Number).filter(Number.isFinite));
+	if (!candidateUwids.length) return { count: 0, total: 0, uwids: [] };
+
+	const session = await mongo.startSession();
+	try {
+		session.startTransaction();
+		const weaponsCollection = await mongo.collection('user_weapon');
+		const passivesCollection = await mongo.collection('user_weapon_passive');
+		const killsCollection = await mongo.collection('user_weapon_kills');
+		const cowoncyCollection = await mongo.collection('cowoncy');
+		const current = await weaponsCollection
+			.find(
+				{ uid, uwid: { $in: candidateUwids }, pid: null, favorite: { $ne: 1 } },
+				{ session, projection: { uwid: 1 } }
+			)
+			.toArray();
+		const currentSet = new Set(current.map((weapon) => Number(weapon.uwid)));
+		const uwids = candidateUwids.filter((uwid) => currentSet.has(uwid));
+		if (!uwids.length) {
+			await session.abortTransaction();
+			return { count: 0, total: 0, uwids: [] };
+		}
+
+		const deleted = await weaponsCollection.deleteMany(
+			{ uid, uwid: { $in: uwids }, pid: null, favorite: { $ne: 1 } },
+			{ session }
+		);
+		if (!deleted.deletedCount) {
+			await session.abortTransaction();
+			return { count: 0, total: 0, uwids: [] };
+		}
+		await passivesCollection.deleteMany({ uwid: { $in: uwids } }, { session });
+		await killsCollection.deleteMany({ uwid: { $in: uwids } }, { session });
+
+		const total = deleted.deletedCount * priceEach;
+		await mongoNumeric.add(
+			cowoncyCollection,
+			{ id: String(p.msg.author.id) },
+			'money',
+			total,
+			{ session, upsert: true }
+		);
+		await session.commitTransaction();
+		return { count: deleted.deletedCount, total, uwids: uwids.slice(0, deleted.deletedCount) };
+	} catch (err) {
+		if (session.inTransaction()) await session.abortTransaction();
+		throw err;
+	} finally {
+		await session.endSession();
+	}
+}
+
 const getRandomWeapon = (exports.getRandomWeapon = function (wid) {
 	let weapon;
 
@@ -92,17 +257,21 @@ exports.getRandomWeapons = function (count, wid) {
 };
 
 exports.getItems = async function (p) {
-	let sql = `SELECT wid,count(uwid) AS count FROM user_weapon WHERE uid = (SELECT uid FROM user WHERE id = ${p.msg.author.id}) GROUP BY wid`;
-	let result = await p.query(sql);
-	let items = {};
-	for (let i = 0; i < result.length; i++) {
-		let key = result[i].wid;
-		if (weapons[key])
+	const uid = await p.global.getUid(p.msg.author.id);
+	const collection = await mongo.collection('user_weapon');
+	const result = await collection
+		.aggregate([{ $match: { uid } }, { $group: { _id: '$wid', count: { $sum: 1 } } }])
+		.toArray();
+	const items = {};
+	for (const row of result) {
+		const key = row._id;
+		if (weapons[key]) {
 			items[key] = {
-				id: key + 100,
-				count: result[i].count,
+				id: Number(key) + 100,
+				count: row.count,
 				emoji: weapons[key].getEmoji,
 			};
+		}
 	}
 	return items;
 };
@@ -339,66 +508,55 @@ exports.askDisplay = async function (p, id, opt = {}) {
 /* Gets a single page */
 let getDisplayPage = async function (p, user, page, sort, opt = {}) {
 	let { wid, widList } = opt;
-	/* Query all weapons */
-	let sql = `SELECT
-			temp.*,
-			user_weapon_passive.wpid, user_weapon_passive.pcount, user_weapon_passive.stat as pstat
-		FROM
-			(SELECT
-				user_weapon.uwid, user_weapon.wid, user_weapon.stat, user_weapon.rrcount, user_weapon.rrattempt, user_weapon.wear, user_weapon.favorite,
-			  animal.name, animal.nickname,
-				uwk.uwid as tt, uwk.kills
-			FROM  user
-				INNER JOIN user_weapon ON user.uid = user_weapon.uid
-				LEFT JOIN animal ON animal.pid = user_weapon.pid
-				LEFT JOIN user_weapon_kills uwk ON user_weapon.uwid = uwk.uwid
-			WHERE
-				user.id = ${user.id} `;
-	if (wid) {
-		sql += `AND user_weapon.wid = ${wid} `;
-	} else if (widList) {
-		sql += `AND user_weapon.wid IN (${widList.join(',')}) `;
-	}
-	sql += 'ORDER BY ';
-
-	if (sort === 'rarity') sql += 'user_weapon.avg DESC,';
-	else if (sort === 'type') sql += 'user_weapon.wid DESC, user_weapon.avg DESC,';
-	else if (sort === 'equipped') sql += 'user_weapon.pid DESC,';
-	else if (sort === 'favorite') sql += 'user_weapon.favorite DESC, user_weapon.avg DESC,';
-	else if (sort === 'tt') sql += 'uwk.kills DESC,';
-	else if (sort === 'wear') sql += 'user_weapon.wear DESC, user_weapon.avg DESC,';
-
-	sql += ` user_weapon.uwid DESC
-			LIMIT ${weaponPerPage}
-			OFFSET ${page * weaponPerPage}) temp
-		LEFT JOIN user_weapon_passive ON temp.uwid = user_weapon_passive.uwid
-	;`;
-	sql += `SELECT COUNT(uwid) as count FROM user
-			INNER JOIN user_weapon ON user.uid = user_weapon.uid
-		WHERE
-			user.id = ${user.id} `;
-	if (wid) {
-		sql += `AND user_weapon.wid = ${wid} `;
-	} else if (widList) {
-		sql += `AND user_weapon.wid IN (${widList.join(',')}) `;
-	}
-	sql += ';';
-	let result = await p.query(sql);
-
-	/* out of bounds or no weapon */
-	if (!result[0][0]) {
+	const uid = await getUserUid(user.id);
+	if (uid === undefined || uid === null) {
 		p.errorMsg(', you do not have any weapons, or the page is out of bounds', 3000);
 		return;
 	}
 
-	/* Parse total weapon count */
-	let totalCount = result[1][0].count;
-	let nextPage = (page + 1) * weaponPerPage <= totalCount;
-	let prevPage = page > 0;
-	let maxPage = Math.ceil(totalCount / weaponPerPage);
+	const collection = await mongo.collection('user_weapon');
+	const filter = buildWeaponFilter(uid, wid, widList);
+	const totalCount = await collection.countDocuments(filter);
+	if (!totalCount) {
+		p.errorMsg(', you do not have any weapons, or the page is out of bounds', 3000);
+		return;
+	}
+
+	const pipeline = [{ $match: filter }];
+	if (sort === 'tt') {
+		pipeline.push(
+			{
+				$lookup: {
+					from: 'user_weapon_kills',
+					localField: 'uwid',
+					foreignField: 'uwid',
+					as: '_tracker',
+				},
+			},
+			{
+				$addFields: {
+					_trackerKills: { $ifNull: [{ $arrayElemAt: ['$_tracker.kills', 0] }, 0] },
+				},
+			},
+			{ $sort: { _trackerKills: -1, uwid: -1 } }
+		);
+	} else {
+		pipeline.push({ $sort: weaponSort(sort) });
+	}
+	pipeline.push({ $skip: page * weaponPerPage }, { $limit: weaponPerPage });
+	const weaponDocs = await collection.aggregate(pipeline).toArray();
+	if (!weaponDocs.length) {
+		p.errorMsg(', you do not have any weapons, or the page is out of bounds', 3000);
+		return;
+	}
+	const rows = await hydrateWeaponRows(weaponDocs);
+	const nextPage = (page + 1) * weaponPerPage <= totalCount;
+	const prevPage = page > 0;
+	const maxPage = Math.ceil(totalCount / weaponPerPage);
+	const sql = null;
 
 	/* Parse all weapons */
-	let user_weapons = parseWeaponQuery(result[0]);
+	let user_weapons = parseWeaponQuery(rows);
 
 	/* Parse actual weapon data for each weapon */
 	let descUser = `These weapons belong to <@${user.id}>`;
@@ -740,15 +898,17 @@ exports.describe = async function (p, uwid) {
 	const uid = await p.global.getUid(user.id);
 	collector.on('collect', async (component, _reactionMember, ack, _err) => {
 		if (component === 'weapon_favorite') {
-			let sql = `UPDATE user_weapon SET favorite = 1 WHERE uwid = ${weapon.ruwid} AND uid = ${uid}`;
-			await p.query(sql);
+			const userWeapons = await mongo.collection('user_weapon');
+			await userWeapons.updateOne({ uwid: weapon.ruwid, uid }, { $set: { favorite: 1 } });
+			weapon.favorite = true;
 			content.components[0].components[0].label = 'Unfavorite';
 			content.components[0].components[0].custom_id = 'weapon_unfavorite';
 			content.components[0].components[0].style = 4;
 			ack(content);
 		} else if (component === 'weapon_unfavorite') {
-			let sql = `UPDATE user_weapon SET favorite = 0 WHERE uwid = ${weapon.ruwid} AND uid = ${uid}`;
-			await p.query(sql);
+			const userWeapons = await mongo.collection('user_weapon');
+			await userWeapons.updateOne({ uwid: weapon.ruwid, uid }, { $set: { favorite: 0 } });
+			weapon.favorite = false;
 			content.components[0].components[0].label = 'Favorite';
 			content.components[0].components[0].custom_id = 'weapon_favorite';
 			content.components[0].components[0].style = 3;
@@ -768,30 +928,30 @@ exports.equip = async function (p, uwid, pet) {
 	const pid = await animalUtil.getPid(p.msg.author.id, pet);
 	const uid = await p.global.getUid(p.msg.author.id);
 	uwid = expandUWID(uwid);
-	if (!uwid || !pid) {
-		return;
-	}
+	if (!uwid || !pid) return;
 
-	let sql = `UPDATE user_weapon SET pid = NULL WHERE pid = ${pid} AND uid = ${uid};`;
-	sql += `UPDATE user_weapon SET pid = ${pid} WHERE uid = ${uid} AND uwid = ${uwid};`;
-	const con = await p.startTransaction();
+	const session = await mongo.startSession();
 	try {
-		const result = await con.query(sql);
-		if (result[1].changedRows <= 0 && result[1].affectedRows <= 0) {
-			await con.rollback();
+		session.startTransaction();
+		const collection = await mongo.collection('user_weapon');
+		await collection.updateMany({ uid, pid }, { $set: { pid: null } }, { session });
+		const equipped = await collection.updateOne({ uid, uwid }, { $set: { pid } }, { session });
+		if (!equipped.matchedCount) {
+			await session.abortTransaction();
 			return;
 		}
-		await con.commit();
+		await session.commitTransaction();
 	} catch (err) {
-		con.rollback();
+		if (session.inTransaction()) await session.abortTransaction();
+		console.error(err);
 		return;
+	} finally {
+		await session.endSession();
 	}
 
 	const { animal, nickname, weapon } =
 		(await teamUtil.getBattleAnimal({ uwid }, p.msg.author.id)) || {};
-	if (!animal || !weapon) {
-		return;
-	}
+	if (!animal || !weapon) return;
 
 	p.replyMsg(
 		weaponEmoji,
@@ -821,8 +981,8 @@ exports.unequip = async function (p, uwid) {
 	}
 
 	const uid = await p.global.getUid(p.msg.author.id);
-	let sql = `UPDATE IGNORE user_weapon SET pid = NULL WHERE uwid = ${uwid} AND uid = ${uid};`;
-	await p.query(sql);
+	const userWeapons = await mongo.collection('user_weapon');
+	await userWeapons.updateOne({ uwid, uid }, { $set: { pid: null } });
 
 	p.replyMsg(
 		weaponEmoji,
@@ -834,11 +994,10 @@ exports.unequip = async function (p, uwid) {
 
 /* Sells a weapon */
 exports.sell = async function (p, uwid) {
-	/* Check if we're selling a rank */
 	uwid = uwid.toLowerCase();
 	for (let i = 0; i < ranks.length; i++) {
 		if (ranks[i].includes(uwid)) {
-			sellRank(p, i);
+			await sellRank(p, i);
 			return;
 		}
 	}
@@ -848,69 +1007,35 @@ exports.sell = async function (p, uwid) {
 		p.errorMsg(', you do not have a weapon with this id!', 3000);
 		return;
 	}
-
-	/* Grab the item we will sell */
-	const weapon = await this.getWeapon(uwid, p.msg.author.id);
-
-	/* not a real weapon! */
+	const weapon = await exports.getWeapon(uwid, p.msg.author.id);
 	if (!weapon) {
 		p.errorMsg(', you do not have a weapon with this id!', 3000);
 		return;
 	}
-
-	/* If an animal is using the weapon */
 	if (weapon.animal?.name) {
 		p.errorMsg(', please unequip the weapon to sell it!', 3000);
 		return;
 	}
-
-	/* Is this weapon sellable? */
 	if (weapon.unsellable) {
 		p.errorMsg(', This weapon cannot be sold!');
 		return;
 	}
-
 	if (weapon.favorite) {
 		p.errorMsg(', unfavorite this weapon to sell!');
 		return;
 	}
 
-	/* Get weapon price */
-	let price = prices[weapon.rank.name];
+	const price = prices[weapon.rank.name];
 	if (!price) {
 		p.errorMsg(', Something went terribly wrong...');
 		return;
 	}
-
-	let sql = `DELETE user_weapon_passive FROM user
-		LEFT JOIN user_weapon ON user.uid = user_weapon.uid
-		LEFT JOIN user_weapon_passive ON user_weapon.uwid = user_weapon_passive.uwid
-		WHERE id = ${p.msg.author.id}
-			AND user_weapon_passive.uwid = ${uwid}
-			AND user_weapon.pid IS NULL;`;
-	sql += `DELETE user_weapon_kills FROM user
-		LEFT JOIN user_weapon ON user.uid = user_weapon.uid
-		LEFT JOIN user_weapon_kills ON user_weapon.uwid = user_weapon_kills.uwid
-		WHERE id = ${p.msg.author.id}
-			AND user_weapon_kills.uwid = ${uwid}
-			AND user_weapon.pid IS NULL;`;
-	sql += `DELETE user_weapon FROM user
-		LEFT JOIN user_weapon ON user.uid = user_weapon.uid
-		WHERE id = ${p.msg.author.id}
-			AND user_weapon.uwid = ${uwid}
-			AND user_weapon.pid IS NULL;`;
-
-	let result = await p.query(sql);
-
-	/* Check if deleted */
-	if (result[2].affectedRows == 0) {
+	const uid = await p.global.getUid(p.msg.author.id);
+	const result = await removeWeaponsAndCredit(p, uid, [uwid], price);
+	if (!result.count) {
 		p.errorMsg(', you do not have a weapon with this id!', 3000);
 		return;
 	}
-
-	/* Give cowoncy */
-	sql = `UPDATE cowoncy SET money = money + ${price} WHERE id = ${p.msg.author.id}`;
-	result = await p.query(sql);
 
 	p.replyMsg(
 		weaponEmoji,
@@ -1044,36 +1169,18 @@ exports.getWID = function (id) {
 };
 
 exports.getWeapon = async function (uwid, id) {
-	if (!uwid) {
-		return null;
-	}
-
-	/* sql query */
-	let sql = `SELECT
-				user.id,
-				a.uwid, a.wid, a.stat, a.wear, a.rrcount, a.rrattempt, a.pid, a.favorite,
-				b.pcount, b.wpid, b.stat as pstat,
-				c.uwid as tt, c.kills,
-				d.name, d.nickname
-			FROM user
-				INNER JOIN user_weapon a ON user.uid = a.uid
-				LEFT JOIN user_weapon_passive b ON a.uwid = b.uwid
-				LEFT JOIN user_weapon_kills c ON a.uwid = c.uwid
-				LEFT JOIN animal d ON a.pid = d.pid
-			WHERE a.uwid = ${uwid}`;
+	if (!uwid) return null;
+	const collection = await mongo.collection('user_weapon');
+	const filter = { uwid: Number(uwid) };
 	if (id) {
-		sql += ` AND user.id = ${id}`;
+		const uid = await getUserUid(id);
+		if (uid === undefined || uid === null) return null;
+		filter.uid = uid;
 	}
-	let result = await mysql.query(sql);
-
-	/* Check if valid */
-	if (!result[0]) {
-		return null;
-	}
-
-	/* parse weapon to get info */
-	let weapon = this.parseWeaponQuery(result);
-	weapon = weapon[Object.keys(weapon)[0]];
-	weapon = this.parseWeapon(weapon);
-	return weapon;
+	const document = await collection.findOne(filter);
+	if (!document) return null;
+	const rows = await hydrateWeaponRows([document]);
+	const parsed = parseWeaponQuery(rows);
+	const data = parsed[Object.keys(parsed)[0]];
+	return data ? parseWeapon(data) : null;
 };
