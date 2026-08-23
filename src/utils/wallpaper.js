@@ -28,23 +28,30 @@ function getStoredUrl(wallpaper) {
 	);
 }
 
-exports.getUrl = function (wallpaper) {
-	if (!wallpaper) return null;
-	const storedUrl = getStoredUrl(wallpaper);
-	if (storedUrl) return storedUrl;
-
+function getGenHostUrl(wallpaper) {
 	const host = String(process.env.GEN_HOST || '')
 		.trim()
 		.replace(/\/+$/, '');
-	if (host && wallpaper.bid != null) return `${host}/background/${wallpaper.bid}.png`;
+	if (!host || wallpaper?.bid === undefined || wallpaper?.bid === null) return null;
+	return `${host}/background/${wallpaper.bid}.png`;
+}
+
+exports.getUrls = function (wallpaper) {
+	if (!wallpaper) return [];
 
 	const bid = Number(wallpaper.bid);
+	const urls = [getGenHostUrl(wallpaper), getStoredUrl(wallpaper)];
+
 	if (Number.isInteger(bid) && bundledWallpaperUrls[bid]) {
-		return bundledWallpaperUrls[bid];
+		urls.push(bundledWallpaperUrls[bid]);
+	}
+	if (Number.isInteger(bid) && bid > 0) {
+		urls.push(`https://owobot.fandom.com/wiki/Special:Redirect/file/Wallpaper${bid}.png`);
 	}
 
-	if (Number.isInteger(bid) && bid > 0) {
-		return `https://owobot.fandom.com/wiki/Special:Redirect/file/Wallpaper${bid}.png`;
-	}
-	return null;
+	return [...new Set(urls.filter(Boolean))];
+};
+
+exports.getUrl = function (wallpaper) {
+	return exports.getUrls(wallpaper)[0] || null;
 };
