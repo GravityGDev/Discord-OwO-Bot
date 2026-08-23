@@ -97,15 +97,13 @@ module.exports = new CommandInterface({
 			) {
 				if (this.msg.channel.guild) opt.guild = true;
 			}
-			let uuid = await levelUtil.display(p, p.msg.author, opt);
 
-			if (!uuid) {
+			const data = await levelUtil.display(p, p.msg.author, opt);
+			if (!data) {
 				p.errorMsg(', I could not generate the image...', 3000);
 				return;
 			}
 
-			let url = `${process.env.GEN_HOST}/level/${uuid}.png`;
-			let data = await p.DataResolver.urlToBuffer(url);
 			await p.send('', null, { file: data, name: 'level.png' });
 			if (!opt.guild && this.msg.channel?.guild) await levelRewards.distributeRewards(p.msg);
 		}
