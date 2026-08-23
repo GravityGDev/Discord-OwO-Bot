@@ -64,14 +64,14 @@ exports.buy = async function (p, id) {
 		await session.endSession();
 	}
 
-	let embed = {
+	const embed = {
 		author: {
 			name: p.getName() + ', you have successfully purchased "' + background.bname + '"!',
 			icon_url: p.msg.author.avatarURL,
 		},
 		color: p.config.embed_color,
 		image: {
-			url: `${process.env.GEN_HOST}/background/${bid}/.png`,
+			url: `${process.env.GEN_HOST}/background/${bid}.png`,
 		},
 	};
 	await p.send({ embed });
