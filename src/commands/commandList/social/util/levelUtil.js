@@ -5,35 +5,17 @@
  * For more information, see README.md and LICENSE
  */
 
-const request = require('request');
 const levels = require('../../../../utils/levels.js');
+const localCardRenderer = require('../../../../utils/localCardRenderer.js');
+const wallpaperUtil = require('../../../../utils/wallpaper.js');
 
 exports.display = async function (p, user, opt) {
-	let info = await generateJson(p, user, opt);
-	info.password = process.env.GEN_PASS;
-
 	try {
-		return new Promise((resolve, _reject) => {
-			request(
-				{
-					method: 'POST',
-					uri: `${process.env.GEN_API_HOST}/levelgen`,
-					json: true,
-					body: info,
-				},
-				(error, res, body) => {
-					if (error) {
-						resolve('');
-						return;
-					}
-					if (res.statusCode == 200) resolve(body);
-					else resolve('');
-				}
-			);
-		});
+		const info = await generateJson(p, user, opt);
+		return await localCardRenderer.renderLevelCard(info, opt);
 	} catch (err) {
-		console.error(err);
-		return '';
+		console.error('[LevelCard] Failed to render local level image:', err);
+		return null;
 	}
 };
 
@@ -66,6 +48,7 @@ async function generateJson(p, user, opt) {
 	return {
 		theme: {
 			background: background.id,
+			backgroundURL: background.url,
 			name_color: background.color,
 			accent,
 			accent2,
@@ -99,12 +82,19 @@ async function getBackground(p, user) {
 	const profiles = await p.mongo.collection('user_profile');
 	const backgrounds = await p.mongo.collection('backgrounds');
 	const storedUser = await users.findOne({ id: String(user.id) }, { projection: { uid: 1 } });
-	if (!storedUser) return { id: 1 };
-	const profile = await profiles.findOne({ uid: storedUser.uid }, { projection: { bid: 1 } });
-	if (!profile?.bid) return { id: 1 };
-	const background = await backgrounds.findOne({ bid: profile.bid });
-	if (!background) return { id: 1 };
-	return { id: background.bid, color: background.name_color };
+	let bid = 1;
+	if (storedUser) {
+		const profile = await profiles.findOne({ uid: storedUser.uid }, { projection: { bid: 1 } });
+		if (profile && profile.bid !== undefined && profile.bid !== null) bid = profile.bid;
+	}
+
+	const background = await backgrounds.findOne({ bid });
+	if (!background) return { id: bid };
+	return {
+		id: background.bid,
+		color: background.name_color,
+		url: wallpaperUtil.getUrl(background),
+	};
 }
 
 async function getInfo(p, user) {
