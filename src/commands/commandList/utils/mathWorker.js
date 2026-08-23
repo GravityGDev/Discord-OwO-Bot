@@ -37,7 +37,11 @@ function compute(expression) {
 	return limitedEvaluate(expression);
 }
 
-// Not a child process if registering app commands, it will fail
-if (!process.env.REGITER_COMMANDS) {
-	workerpool.worker({ compute: compute });
+// command.js discovers every JavaScript file recursively. Register with
+// workerpool only when this file is launched as the actual worker entrypoint,
+// never when it is merely required during normal command discovery.
+if (require.main === module) {
+	workerpool.worker({ compute });
 }
+
+module.exports = { compute };

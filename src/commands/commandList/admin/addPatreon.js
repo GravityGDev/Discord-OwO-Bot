@@ -53,58 +53,67 @@ async function addPatreons(p) {
 	p.send(success + failed);
 }
 
+function fullMonthsPassed(start, now = new Date()) {
+	if (!start) return 0;
+	start = new Date(start);
+	let months = (now.getFullYear() - start.getFullYear()) * 12 + now.getMonth() - start.getMonth();
+	const anniversary = new Date(start);
+	anniversary.setMonth(anniversary.getMonth() + months);
+	if (anniversary > now) months--;
+	return Math.max(0, months);
+}
+
 async function addPatreon(p, id, addMonths = 1, type = 1) {
-	//Parse id
 	if (!p.global.isUser(id) && !p.global.isUser('<@' + id + '>')) {
 		p.errorMsg(', Invalid user id: ' + id, 3000);
 		return;
 	}
 
-	// Parses # of months
 	if (addMonths && p.global.isInt(addMonths)) addMonths = parseInt(addMonths);
 
-	// Parse patreon type (use binary to parse flags)
 	if (type && p.global.isInt(type)) type = parseInt(type);
 	if (type && (type > 3 || type < 1)) {
 		p.errorMsg(', wrong patreon types for ' + id);
 		return;
 	}
 
-	// Query result
-	let sql = `SELECT user.uid,patreonMonths,patreonTimer,TIMESTAMPDIFF(MONTH,patreonTimer,NOW()) AS monthsPassed,patreonType FROM user LEFT JOIN patreons ON user.uid = patreons.uid WHERE id = ${id}`;
-	let result = await p.query(sql);
-	let uid;
-	let months = result[0] && result[0].patreonMonths ? result[0].patreonMonths : 0;
-	let monthsPassed = p.global.isInt(result[0]?.monthsPassed) ? result[0].monthsPassed : months;
-	if (!type) {
-		if (result[0] && result[0].patreonType) type = result[0].patreonType;
-		else type = 1;
-	}
+	const uid = await p.global.getUid(id);
+	const patreons = await p.mongo.collection('patreons');
+	const current = await patreons.findOne({ uid });
+	const months = current?.patreonMonths || 0;
+	const monthsPassed = current?.patreonTimer
+		? fullMonthsPassed(current.patreonTimer)
+		: months;
 
-	// If uid does not exist
-	if (result.length < 1 || !result[0].uid) {
-		sql = `INSERT IGNORE INTO user (id,count) VALUES (${id},0);`;
-		result = await p.query(sql);
-		uid = result.insertId;
-	} else {
-		uid = result[0].uid;
-	}
+	if (!type) type = current?.patreonType || 1;
 
-	// reset timer or continue with current timer
 	let date;
-	if (months <= monthsPassed) {
-		sql = `INSERT INTO patreons (uid,patreonMonths,patreonType) VALUES (${uid},${addMonths},${type}) ON DUPLICATE KEY UPDATE patreonType = ${type}, patreonMonths = ${addMonths},patreonTimer = NOW();`;
-		date = new Date();
+	if (!current || months <= monthsPassed) {
+		const timer = new Date();
+		await patreons.updateOne(
+			{ uid },
+			{
+				$set: {
+					uid,
+					patreonType: type,
+					patreonMonths: addMonths,
+					patreonTimer: timer,
+				},
+			},
+			{ upsert: true }
+		);
+		date = new Date(timer);
 		date.setMonth(date.getMonth() + addMonths);
 	} else {
-		sql = `UPDATE patreons SET patreonType = ${type}, patreonMonths = patreonMonths + ${addMonths} WHERE uid = ${uid};`;
-		date = new Date(result[0].patreonTimer);
+		await patreons.updateOne(
+			{ uid },
+			{ $set: { patreonType: type }, $inc: { patreonMonths: addMonths } }
+		);
+		date = new Date(current.patreonTimer);
 		date.setMonth(date.getMonth() + addMonths + months);
 	}
 	date = date.toString();
-	result = await p.query(sql);
 
-	// Send msgs
 	let user;
 	if (addMonths > 0)
 		user = await p.sender.msgUser(

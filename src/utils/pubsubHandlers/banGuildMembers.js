@@ -15,21 +15,33 @@ exports.handle = async function (main, message) {
 	if (!guild) return;
 
 	let memberIds = [];
-	let memberSql = [];
 	let memberCount = 0;
 	let log = '';
 	guild.members.forEach((member) => {
-		memberIds.push(member.id);
-		memberSql.push(`(${member.id}, NOW(), 1, 999999)`);
+		memberIds.push(String(member.id));
 		log += member.id + ',';
 		memberCount++;
 	});
 	console.log(log);
 
-	const sql = `INSERT INTO timeout (id, time, count, penalty) VALUES ${memberSql.join(
-		','
-	)} ON DUPLICATE KEY UPDATE time = NOW(), count = count + 1, penalty = 999999;`;
-	await main.mysqlhandler.query(sql);
+	if (memberIds.length) {
+		const timeout = await main.mongo.collection('timeout');
+		const now = new Date();
+		await timeout.bulkWrite(
+			memberIds.map((id) => ({
+				updateOne: {
+					filter: { id },
+					update: {
+						$set: { time: now, penalty: 999999 },
+						$inc: { count: 1 },
+						$setOnInsert: { id },
+					},
+					upsert: true,
+				},
+			})),
+			{ ordered: false }
+		);
+	}
 
 	let userList = '';
 	for (let i in memberIds) {

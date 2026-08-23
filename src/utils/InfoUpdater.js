@@ -24,6 +24,7 @@ class InfoUpdater {
 	}
 
 	updateBotInfo() {
+		if (!process.env.SHARDER_HOST) return;
 		let info = {
 			password: process.env.SHARDER_PASS,
 			guilds: this.main.bot.guilds.size,
@@ -40,12 +41,13 @@ class InfoUpdater {
 			},
 			(err, res) => {
 				if (err) {
+					console.error('[InfoUpdater] Sharder reporting failed');
 					console.error(err);
-					throw err;
+					return;
 				}
-				let guilds = res.body.guilds;
+				let guilds = res?.body?.guilds;
+				if (guilds === undefined) return;
 				guilds = this.main.global.toFancyNum(guilds);
-				// this.main.bot.editStatus(null,{name:guilds+" servers!",type:3});
 				this.main.bot.editStatus(null, {
 					name: ` with ${guilds} servers!`,
 					type: 1,
@@ -56,6 +58,7 @@ class InfoUpdater {
 	}
 
 	async updateDBLInfo() {
+		if (!this.main.dbl) return;
 		if (!this.totalShards) this.totalShards = await this.main.global.getTotalShardCount();
 		let guildSize = Math.floor(this.main.bot.guilds.size / this.main.bot.shards.size);
 

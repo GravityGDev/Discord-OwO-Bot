@@ -39,9 +39,8 @@ exports.toSmallNum = function (count, digits) {
 };
 
 exports.displayWallpaperShop = async function (p) {
-	let sql = 'SELECT COUNT(bid) AS count FROM backgrounds WHERE active = 1;';
-	let result = await p.query(sql);
-	let totalPages = result[0].count;
+	const backgrounds = await p.mongo.collection('backgrounds');
+	const totalPages = await backgrounds.countDocuments({ active: 1 });
 	let currentPage = 1;
 	if (p.args.length > 1 && p.global.isInt(p.args[1])) {
 		currentPage = parseInt(p.args[1]);
@@ -83,10 +82,15 @@ exports.displayWallpaperShop = async function (p) {
 };
 
 async function getWallpaperPage(p, currentPage, totalPages) {
-	let sql = `SELECT b.*,u.uid FROM backgrounds b LEFT JOIN (user_backgrounds ub INNER JOIN user u ON u.uid = ub.uid AND u.id = ${
-		p.msg.author.id
-	}) ON b.bid = ub.bid WHERE b.active = 1 ORDER BY b.bid LIMIT 1 OFFSET ${currentPage - 1};`;
-	let result = await p.query(sql);
+	const backgrounds = await p.mongo.collection('backgrounds');
+	const userBackgrounds = await p.mongo.collection('user_backgrounds');
+	const uid = await p.global.getUid(p.msg.author.id);
+	const wallpaper = await backgrounds
+		.find({ active: 1 })
+		.sort({ bid: 1 })
+		.skip(Math.max(0, currentPage - 1))
+		.limit(1)
+		.next();
 
 	let embed = {
 		author: {
@@ -101,17 +105,18 @@ async function getWallpaperPage(p, currentPage, totalPages) {
 
 	let idOffset = 200;
 	let charLen = 35;
-	if (result[0]) {
-		let price = p.global.toShortNum(result[0].price);
-		if (result[0].uid) price = 'OWNED';
-		let cLength = charLen - result[0].bname.length + (4 - ('' + price).length);
-		embed.description = `\`${idOffset + result[0].bid}\` **\`${result[0].bname}\`**\`${'-'.repeat(
+	if (wallpaper) {
+		const owned = await userBackgrounds.findOne({ uid, bid: wallpaper.bid });
+		let price = p.global.toShortNum(wallpaper.price);
+		if (owned) price = 'OWNED';
+		let cLength = charLen - wallpaper.bname.length + (4 - ('' + price).length);
+		embed.description = `\`${idOffset + wallpaper.bid}\` **\`${wallpaper.bname}\`**\`${'-'.repeat(
 			cLength
 		)} ${price}\` <:cowoncy:416043450337853441>`;
 		embed.image = {
-			url: `${process.env.GEN_HOST}/background/${result[0].bid}.png`,
+			url: `${process.env.GEN_HOST}/background/${wallpaper.bid}.png`,
 		};
-		if (result[0].profile) embed.description = '*' + embed.description;
+		if (wallpaper.profile) embed.description = '*' + embed.description;
 	} else {
 		embed.description = 'There are no wallpapers to purchase';
 		delete embed.footer;

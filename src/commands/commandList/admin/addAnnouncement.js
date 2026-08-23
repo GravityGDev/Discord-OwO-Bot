@@ -6,6 +6,7 @@
  */
 
 const CommandInterface = require('../../CommandInterface.js');
+const mongoCounters = require('../../../utils/mongoCounters.js');
 
 module.exports = new CommandInterface({
 	alias: ['addannouncement'],
@@ -14,16 +15,21 @@ module.exports = new CommandInterface({
 
 	execute: async function (p) {
 		try {
-			let url = p.args[0];
-			let data = await p.DataResolver.urlToBuffer(url);
+			const url = p.args[0];
+			const data = await p.DataResolver.urlToBuffer(url);
 			await p.send('This is a test message! Does it look ok?', null, {
 				file: data,
 				name: 'announcement.png',
 			});
-			let sql = 'INSERT INTO announcement (url) VALUES (?)';
-			await p.query(sql, [url]);
+
+			const announcements = await p.mongo.collection('announcement');
+			const latest = await announcements.findOne({}, { sort: { aid: -1 } });
+			await mongoCounters.seedAtLeast('announcement_aid', latest?.aid || 0);
+			const aid = await mongoCounters.next('announcement_aid');
+			await announcements.insertOne({ aid, url, adate: new Date() });
 			await p.send('Added new announcement!');
 		} catch (err) {
+			console.error(err);
 			p.errorMsg(', failed to add announcement');
 		}
 	},

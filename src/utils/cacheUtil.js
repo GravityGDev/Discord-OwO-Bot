@@ -4,7 +4,8 @@
  * This software is licensed under Creative Commons Attribution-NonCommercial-ShareAlike 4.0 International
  * For more information, see README.md and LICENSE
  */
-const mysql = require('./../botHandlers/mysqlHandler.js');
+const mongo = require('./mongo.js');
+const counters = require('./mongoCounters.js');
 
 class CacheUtil {
 	constructor() {
@@ -43,13 +44,18 @@ class CacheUtil {
 
 	async getAnimalCount(animalName) {
 		let result = this.get('animalcount', animalName);
-		if (result) {
+		if (result !== undefined) {
 			return result;
 		}
 
-		const sql = `SELECT SUM(totalcount) as total FROM animal WHERE name = ?;`;
-		result = await mysql.query(sql, animalName);
-		const total = result[0].total;
+		const animals = await mongo.collection('animal');
+		const rows = await animals
+			.aggregate([
+				{ $match: { name: animalName } },
+				{ $group: { _id: null, total: { $sum: '$totalcount' } } },
+			])
+			.toArray();
+		const total = rows[0]?.total || 0;
 
 		// Only cache if we have over 1000 animals
 		if (total > 1000) {
@@ -59,42 +65,59 @@ class CacheUtil {
 	}
 
 	async getUid(id) {
-		id = BigInt(id);
+		id = String(id);
 		let result = this.get('uid', id);
-		if (result) {
+		if (result !== undefined) {
 			return result;
 		}
-		let sql = 'SELECT uid FROM user where id = ?;';
-		result = await mysql.query(sql, id);
 
-		if (result[0]?.uid) {
-			this.set('uid', id, result[0].uid);
-			return result[0].uid;
+		const users = await mongo.collection('user');
+		let user = await users.findOne({ id }, { projection: { uid: 1 } });
+		if (user?.uid !== undefined) {
+			this.set('uid', id, user.uid);
+			return user.uid;
 		}
 
-		sql = 'INSERT INTO user (id, count) VALUES (?, 0);';
-		result = await mysql.query(sql, id);
-
-		this.set('uid', id, result.insertId);
-		return result.insertId;
+		const uid = await counters.next('user_uid');
+		try {
+			await users.insertOne({
+				_id: `user:${id}`,
+				id,
+				uid,
+				count: 0,
+				patreonAnimal: 0,
+				patreonDaily: 0,
+				started: new Date(),
+			});
+			this.set('uid', id, uid);
+			return uid;
+		} catch (err) {
+			// Another shard may have created the user between our read and insert.
+			if (err?.code !== 11000) throw err;
+			user = await users.findOne({ id }, { projection: { uid: 1 } });
+			if (!user?.uid) throw err;
+			this.set('uid', id, user.uid);
+			return user.uid;
+		}
 	}
 
 	async getQuests(id) {
+		id = String(id);
 		let result = this.get('quest', id);
 		if (result) {
 			return result;
 		}
 
-		/* Check if user has this quest */
 		const uid = await this.getUid(id);
-		result = await mysql.query('SELECT * FROM quest WHERE uid = ?;', [uid]);
+		const quests = await mongo.collection('quest');
+		result = await quests.find({ uid }).toArray();
 
 		this.set('quest', id, result, 1 * 60 * 60 * 1000);
 		return result;
 	}
 
 	clearQuests(id) {
-		this.clear('quest', id);
+		this.clear('quest', String(id));
 	}
 
 	async getQuestByName(questName, id, showLocked = false) {
@@ -105,16 +128,16 @@ class CacheUtil {
 	}
 
 	async getAnimalNames(id) {
-		id = BigInt(id);
+		id = String(id);
 		let result = this.get('animalNames', id);
 		if (result) {
 			return result;
 		}
 
-		const sql = `SELECT name FROM animal WHERE id = ${id};`;
-		result = await mysql.query(sql);
+		const collection = await mongo.collection('animal');
+		const rows = await collection.find({ id }, { projection: { name: 1 } }).toArray();
 		const animals = {};
-		result.forEach((row) => {
+		rows.forEach((row) => {
 			animals[row.name] = true;
 		});
 		this.set('animalNames', id, animals);
@@ -122,13 +145,32 @@ class CacheUtil {
 	}
 
 	async insertAnimal(id, animalName) {
+		id = String(id);
 		const animals = await this.getAnimalNames(id);
 		if (animals[animalName]) {
 			return;
 		}
 
-		const sql = `INSERT IGNORE INTO animal (id, name, count, totalcount) VALUES (${id}, '${animalName}', 0, 0);`;
-		await mysql.query(sql);
+		const collection = await mongo.collection('animal');
+		const pid = await counters.next('animal_pid');
+		try {
+			await collection.insertOne({
+				_id: `animal:${encodeURIComponent(id)}:${encodeURIComponent(animalName)}`,
+				id,
+				name: animalName,
+				pid,
+				count: 0,
+				xp: 0,
+				ispet: 0,
+				nickname: null,
+				totalcount: 0,
+				offensive: 0,
+				sellcount: 0,
+				saccount: 0,
+			});
+		} catch (err) {
+			if (err?.code !== 11000) throw err;
+		}
 
 		animals[animalName] = true;
 	}

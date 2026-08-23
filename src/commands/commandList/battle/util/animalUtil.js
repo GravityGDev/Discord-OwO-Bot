@@ -68,12 +68,6 @@ function getXP(lvl) {
 	return Math.pow(lvl, 4) + 1000;
 }
 
-/* Returns sql for giving xp to animal */
-exports.giveXP = function (pid, xp) {
-	let sql = `UPDATE IGNORE animal SET xp = xp + ${xp} WHERE pid = ${pid};`;
-	return sql;
-};
-
 const barLength = 24;
 exports.bar = function (stats) {
 	let bar = '';

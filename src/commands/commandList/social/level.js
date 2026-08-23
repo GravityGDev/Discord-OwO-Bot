@@ -38,14 +38,8 @@ module.exports = new CommandInterface({
 					'name': 'type',
 					'description': 'Either server or global level',
 					'choices': [
-						{
-							'name': 'Server',
-							'value': 'server',
-						},
-						{
-							'name': 'Global',
-							'value': 'global',
-						},
+						{ 'name': 'Server', 'value': 'server' },
+						{ 'name': 'Global', 'value': 'global' },
 					],
 				},
 			],
@@ -60,8 +54,13 @@ module.exports = new CommandInterface({
 		let perms = p.msg.member?.permissions;
 		if (p.args.length >= 1 && ['disable', 'disabletext', 'dt'].includes(p.args[0].toLowerCase())) {
 			if (perms.has('manageChannels')) {
-				let sql = `INSERT INTO guild_setting (id,levelup) VALUES (${p.msg.channel.guild.id},1) ON DUPLICATE KEY UPDATE levelup = 1;`;
-				await p.query(sql);
+				const settings = await p.mongo.collection('guild_setting');
+				const id = String(p.msg.channel.guild.id);
+				await settings.updateOne(
+					{ id },
+					{ $set: { levelup: 1 }, $setOnInsert: { id } },
+					{ upsert: true }
+				);
 				await p.replyMsg(
 					settingEmoji,
 					', level up messages will **not** be displayed in this guild.'
@@ -75,15 +74,19 @@ module.exports = new CommandInterface({
 			['enable', 'enabletext', 'et'].includes(p.args[0].toLowerCase())
 		) {
 			if (perms.has('manageChannels')) {
-				let sql = `UPDATE guild_setting SET levelup = 0 WHERE id = ${p.msg.channel.guild.id};`;
-				await p.query(sql);
+				const settings = await p.mongo.collection('guild_setting');
+				const id = String(p.msg.channel.guild.id);
+				await settings.updateOne(
+					{ id },
+					{ $set: { levelup: 0 }, $setOnInsert: { id } },
+					{ upsert: true }
+				);
 				await p.replyMsg(settingEmoji, ', level up messages will be displayed in this guild.');
 			} else {
 				p.errorMsg(', you do not have the `MANAGE_CHANNELS` permission!', 3000);
 				return;
 			}
 		} else {
-			//try{
 			let opt = {};
 			if (
 				this.options.type === 'server' ||
@@ -92,27 +95,17 @@ module.exports = new CommandInterface({
 				p.args[0] == 'g' ||
 				p.args[0] == 'guild'
 			) {
-				if (this.msg.channel.guild) {
-					opt.guild = true;
-				}
+				if (this.msg.channel.guild) opt.guild = true;
 			}
-			let uuid = await levelUtil.display(p, p.msg.author, opt);
 
-			if (!uuid) {
+			const data = await levelUtil.display(p, p.msg.author, opt);
+			if (!data) {
 				p.errorMsg(', I could not generate the image...', 3000);
 				return;
 			}
 
-			let url = `${process.env.GEN_HOST}/level/${uuid}.png`;
-			let data = await p.DataResolver.urlToBuffer(url);
 			await p.send('', null, { file: data, name: 'level.png' });
 			if (!opt.guild && this.msg.channel?.guild) await levelRewards.distributeRewards(p.msg);
-			/*
-			}catch(e){
-				console.error(e);
-				p.errorMsg(", failed to create level image... Try again later :(",3000);
-			}
-			*/
 		}
 	},
 });

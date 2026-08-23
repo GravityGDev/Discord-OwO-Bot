@@ -5,37 +5,17 @@
  * For more information, see README.md and LICENSE
  */
 
-const request = require('request');
 const levels = require('../../../../utils/levels.js');
+const localCardRenderer = require('../../../../utils/localCardRenderer.js');
+const wallpaperUtil = require('../../../../utils/wallpaper.js');
 
 exports.display = async function (p, user, opt) {
-	/* Construct json for POST request */
-	let info = await generateJson(p, user, opt);
-	info.password = process.env.GEN_PASS;
-
-	/* Returns a promise to avoid callback hell */
 	try {
-		return new Promise((resolve, _reject) => {
-			request(
-				{
-					method: 'POST',
-					uri: `${process.env.GEN_API_HOST}/levelgen`,
-					json: true,
-					body: info,
-				},
-				(error, res, body) => {
-					if (error) {
-						resolve('');
-						return;
-					}
-					if (res.statusCode == 200) resolve(body);
-					else resolve('');
-				}
-			);
-		});
+		const info = await generateJson(p, user, opt);
+		return await localCardRenderer.renderLevelCard(info, opt);
 	} catch (err) {
-		console.err(err);
-		return '';
+		console.error('[LevelCard] Failed to render local level image:', err);
+		return null;
 	}
 };
 
@@ -68,6 +48,7 @@ async function generateJson(p, user, opt) {
 	return {
 		theme: {
 			background: background.id,
+			backgroundURL: background.url,
 			name_color: background.color,
 			accent,
 			accent2,
@@ -96,40 +77,44 @@ async function getRank(p, user, opt) {
 	};
 }
 
-/* eslint-disable-next-line */
-function shortenInt(value) {
-	let newValue = value;
-	if (value >= 1000) {
-		let suffixes = ['', 'K', 'M', 'B', 'T'];
-		let suffixNum = Math.floor((('' + value).length - 1) / 3);
-		let shortValue = value / Math.pow(10, suffixNum * 3);
-		let offset = Math.pow(10, 2 - Math.floor(Math.log10(shortValue)));
-		if (offset == 0) shortValue = Math.round(shortValue);
-		else shortValue = Math.round(shortValue * offset) / offset;
-		newValue = shortValue + suffixes[suffixNum];
-	}
-	return newValue;
-}
-
 async function getBackground(p, user) {
-	let sql = `SELECT b.name_color,b.bid FROM user u INNER JOIN user_profile up ON u.uid = up.uid INNER JOIN backgrounds b ON up.bid = b.bid WHERE id = ${user.id};`;
-	let result = await p.query(sql);
-	if (!result[0]) return { id: 1 };
-	return { id: result[0].bid, color: result[0].name_color };
+	const uid = await p.global.getUid(user.id);
+	const profiles = await p.mongo.collection('user_profile');
+	const backgrounds = await p.mongo.collection('backgrounds');
+	const profile = await profiles.findOne({ uid }, { projection: { bid: 1 } });
+
+	let bid = 1;
+	if (profile?.bid !== undefined && profile?.bid !== null) bid = profile.bid;
+
+	const background = await backgrounds.findOne({ bid });
+	if (!background) {
+		return {
+			id: bid,
+			url: wallpaperUtil.getUrl({ bid }),
+		};
+	}
+
+	return {
+		id: background.bid,
+		color: background.name_color,
+		url: wallpaperUtil.getUrl(background),
+	};
 }
 
 async function getInfo(p, user) {
-	let sql = `SELECT user_profile.* from user_profile INNER JOIN user ON user.uid = user_profile.uid WHERE user.id = ${user.id};`;
-	let result = await p.query(sql);
+	const users = await p.mongo.collection('user');
+	const profiles = await p.mongo.collection('user_profile');
+	const storedUser = await users.findOne({ id: String(user.id) }, { projection: { uid: 1 } });
+	const result = storedUser ? await profiles.findOne({ uid: storedUser.uid }) : null;
 	let info = {
 		about: "I'm just a plain human.",
 		title: 'An OwO Bot User',
 	};
-	if (result[0]) {
-		if (result[0].about) info.about = result[0].about;
-		if (result[0].accent) info.accent = result[0].accent;
-		if (result[0].accent2) info.accent2 = result[0].accent2;
-		if (result[0].title) info.title = result[0].title;
+	if (result) {
+		if (result.about) info.about = result.about;
+		if (result.accent) info.accent = result.accent;
+		if (result.accent2) info.accent2 = result.accent2;
+		if (result.title) info.title = result.title;
 	}
 	return info;
 }

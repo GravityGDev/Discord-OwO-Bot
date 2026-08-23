@@ -6,6 +6,7 @@
  */
 
 const CommandInterface = require('../../CommandInterface.js');
+const mongoNumeric = require('../../../utils/mongoNumeric.js');
 
 const giftEmoji = '🎁';
 
@@ -27,91 +28,132 @@ module.exports = new CommandInterface({
 	cooldown: 15000,
 
 	execute: async function (p) {
-		// Fetch user and compensation info
-		let sql = ` SELECT c.*
-			FROM compensation c
-				LEFT JOIN (
-					SELECT uc.cid, uc.uid FROM user_compensation uc
-						INNER JOIN user u ON uc.uid = u.uid
-					WHERE id = ${p.msg.author.id} 
-				) temp ON c.id = temp.cid
-			WHERE end_date > NOW()
-				AND temp.uid IS NULL;`;
-		sql += `SELECT uid FROM user WHERE id = ${p.msg.author.id};`;
-		let result = await p.query(sql);
-
-		// No rewards available
-		if (!result[0].length) {
-			p.errorMsg(', there are no rewards available at this time!', 5000);
-			return;
-		}
-
-		const uid = result[1][0].uid;
+		const uid = await p.global.getUid(p.msg.author.id);
 		if (!uid) {
 			p.errorMsg(', Failed to claim rewards', 5000);
 			return;
 		}
 
-		// parse rewards
+		const compensation = await p.mongo.collection('compensation');
+		const userCompensation = await p.mongo.collection('user_compensation');
+		const cowoncy = await p.mongo.collection('cowoncy');
+		const lootbox = await p.mongo.collection('lootbox');
+		const crate = await p.mongo.collection('crate');
+		const activeRewards = await compensation.find({ end_date: { $gt: new Date() } }).toArray();
+
+		if (!activeRewards.length) {
+			p.errorMsg(', there are no rewards available at this time!', 5000);
+			return;
+		}
+
 		let totalRewards = 0;
 		let totalCowoncy = 0;
 		let totalLootbox = 0;
 		let totalFabledLootbox = 0;
 		let totalWeaponCrate = 0;
-		for (let i in result[0]) {
-			let row = result[0][i];
-			sql = `INSERT IGNORE INTO user_compensation (uid, cid) VALUES (${uid}, ${row.id});`;
-			let result2 = await p.query(sql);
+		const session = await p.mongo.startSession();
 
-			if (result2.affectedRows) {
-				sql = '';
+		try {
+			session.startTransaction();
+
+			for (const row of activeRewards) {
+				const claim = await userCompensation.updateOne(
+					{ uid, cid: row.id },
+					{ $setOnInsert: { uid, cid: row.id, claimedAt: new Date() } },
+					{ upsert: true, session }
+				);
+				if (!claim.upsertedCount) continue;
+
 				totalRewards++;
-				const rewards = row.reward.split(',');
-				rewards.forEach((reward) => {
+				for (const reward of String(row.reward || '').split(',')) {
+					if (!reward) continue;
 					const type = reward.charAt(0);
 					const count = parseInt(reward.substring(1));
+					if (!Number.isInteger(count) || count <= 0) continue;
+
 					switch (type) {
 						case 'c':
-							sql += `INSERT INTO cowoncy (id, money) VALUES (${p.msg.author.id}, ${count}) ON DUPLICATE KEY UPDATE money = money + ${count};`;
 							totalCowoncy += count;
 							break;
 						case 'l':
-							sql += `INSERT INTO lootbox (id,boxcount,claimcount,claim) VALUES (${p.msg.author.id},${count},0,'2017-01-01') ON DUPLICATE KEY UPDATE boxcount = boxcount + ${count};`;
 							totalLootbox += count;
 							break;
 						case 'w':
-							sql += `INSERT INTO crate (uid,cratetype,boxcount,claimcount,claim) VALUES (${uid},0,${count},0,'2017-01-01') ON DUPLICATE KEY UPDATE boxcount = boxcount + ${count};`;
 							totalWeaponCrate += count;
 							break;
 						case 'f':
-							sql += `INSERT INTO lootbox (id,fbox,claimcount,claim) VALUES (${p.msg.author.id},${count},0,'2017-01-01') ON DUPLICATE KEY UPDATE fbox = fbox + ${count};`;
 							totalFabledLootbox += count;
 							break;
 					}
-				});
-				await p.query(sql);
+				}
 			}
-		}
 
-		if (!totalRewards) {
+			if (!totalRewards) {
+				await session.abortTransaction();
+				p.errorMsg(', there are no rewards available at this time!', 5000);
+				return;
+			}
+
+			if (totalCowoncy) {
+				await mongoNumeric.add(
+					cowoncy,
+					{ id: String(p.msg.author.id) },
+					'money',
+					totalCowoncy,
+					{ upsert: true, session },
+					{ id: String(p.msg.author.id) }
+				);
+			}
+			if (totalLootbox || totalFabledLootbox) {
+				const inc = {};
+				if (totalLootbox) inc.boxcount = totalLootbox;
+				if (totalFabledLootbox) inc.fbox = totalFabledLootbox;
+				await lootbox.updateOne(
+					{ id: String(p.msg.author.id) },
+					{
+						$inc: inc,
+						$setOnInsert: {
+							id: String(p.msg.author.id),
+							claimcount: 0,
+							claim: new Date('2017-01-01T00:00:00.000Z'),
+						},
+					},
+					{ upsert: true, session }
+				);
+			}
+			if (totalWeaponCrate) {
+				await crate.updateOne(
+					{ uid, cratetype: 0 },
+					{
+						$inc: { boxcount: totalWeaponCrate },
+						$setOnInsert: {
+							uid,
+							cratetype: 0,
+							claimcount: 0,
+							claim: new Date('2017-01-01T00:00:00.000Z'),
+						},
+					},
+					{ upsert: true, session }
+				);
+			}
+
+			await session.commitTransaction();
+		} catch (err) {
+			console.error(err);
+			if (session.inTransaction()) await session.abortTransaction();
 			p.errorMsg(', Failed to claim rewards', 5000);
 			return;
+		} finally {
+			await session.endSession();
 		}
+
 		let txt = `, You claimed ${totalRewards} reward(s)! 🎉\n`;
 		txt += `${p.config.emoji.blank} **|** `;
-		let rewardTxt = [];
-		if (totalCowoncy) {
-			rewardTxt.push(`+${totalCowoncy} ${p.config.emoji.cowoncy}`);
-		}
-		if (totalWeaponCrate) {
-			rewardTxt.push(`+${totalWeaponCrate} ${p.config.emoji.crate}`);
-		}
-		if (totalLootbox) {
-			rewardTxt.push(`+${totalLootbox} ${p.config.emoji.lootbox}`);
-		}
-		if (totalFabledLootbox) {
-			rewardTxt.push(`+${totalFabledLootbox} ${p.config.emoji.fabledLootbox}`);
-		}
+		const rewardTxt = [];
+		if (totalCowoncy) rewardTxt.push(`+${totalCowoncy} ${p.config.emoji.cowoncy}`);
+		if (totalWeaponCrate) rewardTxt.push(`+${totalWeaponCrate} ${p.config.emoji.crate}`);
+		if (totalLootbox) rewardTxt.push(`+${totalLootbox} ${p.config.emoji.lootbox}`);
+		if (totalFabledLootbox) rewardTxt.push(`+${totalFabledLootbox} ${p.config.emoji.fabledLootbox}`);
 		txt += rewardTxt.join(',');
 		await p.replyMsg(giftEmoji, txt);
 	},

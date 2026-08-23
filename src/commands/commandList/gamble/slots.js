@@ -6,6 +6,7 @@
  */
 
 const CommandInterface = require('../../CommandInterface.js');
+const mongoNumeric = require('../../../utils/mongoNumeric.js');
 
 const maxBet = 250000;
 const slots = [
@@ -44,7 +45,6 @@ module.exports = new CommandInterface({
 		let global = p.global,
 			msg = p.msg,
 			args = p.args;
-		//Check arguments
 		let amount = 0;
 		let all = false;
 		if (args.length == 0) amount = 1;
@@ -66,85 +66,100 @@ module.exports = new CommandInterface({
 			return;
 		}
 
-		//Check if valid time and cowoncy
-		let sql = 'SELECT money FROM cowoncy WHERE id = ' + msg.author.id + ';';
-		let result = await p.query(sql);
-		if (all && result[0] != undefined) amount = result[0].money;
+		const balances = await p.mongo.collection('cowoncy');
+		const balance = await balances.findOne(
+			{ id: String(msg.author.id) },
+			{ projection: { money: 1 } }
+		);
+		const money = mongoNumeric.toBigInt(balance?.money || 0);
+		if (all) amount = Number(money > BigInt(maxBet) ? BigInt(maxBet) : money);
 		if (maxBet && amount > maxBet) amount = maxBet;
-		if (result[0] == undefined || result[0].money < amount || result[0].money <= 0) {
+		if (money <= 0n || amount <= 0 || money < BigInt(amount)) {
 			p.send('**🚫 | ' + p.getName() + "**, You don't have enough cowoncy!", 3000);
+			return;
+		}
+
+		let rslots = [];
+		let rand = (await random(1, 1000)) / 10;
+		let win = 0;
+		let logging = 0;
+		if (rand <= 20) {
+			win = amount;
+			rslots.push(slots[0]);
+			rslots.push(slots[0]);
+			rslots.push(slots[0]);
+			logging = 0;
+		} else if (rand <= 40) {
+			win = amount * 2;
+			rslots.push(slots[1]);
+			rslots.push(slots[1]);
+			rslots.push(slots[1]);
+			logging = 1;
+		} else if (rand <= 45) {
+			win = amount * 3;
+			rslots.push(slots[2]);
+			rslots.push(slots[2]);
+			rslots.push(slots[2]);
+			logging = 2;
+		} else if (rand <= 47.5) {
+			win = amount * 4;
+			rslots.push(slots[3]);
+			rslots.push(slots[3]);
+			rslots.push(slots[3]);
+			logging = 3;
+		} else if (rand <= 48.5) {
+			win = amount * 10;
+			rslots.push(slots[4]);
+			rslots.push(slots[5]);
+			rslots.push(slots[4]);
+			logging = 9;
 		} else {
-			//Decide results
-			let rslots = [];
-			let rand = (await random(1, 1000)) / 10;
-			let win = 0;
-			let logging = 0;
-			if (rand <= 20) {
-				//1x 20%
-				win = amount;
-				rslots.push(slots[0]);
-				rslots.push(slots[0]);
-				rslots.push(slots[0]);
-				logging = 0;
-			} else if (rand <= 40) {
-				//2x 20%
-				win = amount * 2;
-				rslots.push(slots[1]);
-				rslots.push(slots[1]);
-				rslots.push(slots[1]);
-				logging = 1;
-			} else if (rand <= 45) {
-				//3x 5%
-				win = amount * 3;
-				rslots.push(slots[2]);
-				rslots.push(slots[2]);
-				rslots.push(slots[2]);
-				logging = 2;
-			} else if (rand <= 47.5) {
-				//4x 2.5%
-				win = amount * 4;
-				rslots.push(slots[3]);
-				rslots.push(slots[3]);
-				rslots.push(slots[3]);
-				logging = 3;
-			} else if (rand <= 48.5) {
-				//10x 1%
-				win = amount * 10;
-				rslots.push(slots[4]);
-				rslots.push(slots[5]);
-				rslots.push(slots[4]);
-				logging = 9;
-			} else {
-				logging = -1;
-				var slot1 = Math.floor(Math.random() * (slots.length - 1));
-				var slot2 = Math.floor(Math.random() * (slots.length - 1));
-				var slot3 = Math.floor(Math.random() * (slots.length - 1));
-				if (slot3 == slot1)
-					slot2 = (slot1 + Math.ceil(Math.random() * (slots.length - 2))) % (slots.length - 1);
-				if (slot2 == slots.length - 2) slot2++;
-				rslots.push(slots[slot1]);
-				rslots.push(slots[slot2]);
-				rslots.push(slots[slot3]);
-			}
-			let winmsg =
-				win == 0 ? 'nothing... :c' : '<:cowoncy:416043450337853441> ' + p.global.toFancyNum(win);
+			logging = -1;
+			var slot1 = Math.floor(Math.random() * (slots.length - 1));
+			var slot2 = Math.floor(Math.random() * (slots.length - 1));
+			var slot3 = Math.floor(Math.random() * (slots.length - 1));
+			if (slot3 == slot1)
+				slot2 = (slot1 + Math.ceil(Math.random() * (slots.length - 2))) % (slots.length - 1);
+			if (slot2 == slots.length - 2) slot2++;
+			rslots.push(slots[slot1]);
+			rslots.push(slots[slot2]);
+			rslots.push(slots[slot3]);
+		}
+		let winmsg =
+			win == 0 ? 'nothing... :c' : '<:cowoncy:416043450337853441> ' + p.global.toFancyNum(win);
 
-			sql =
-				'UPDATE cowoncy SET money = money + ' +
-				(win - amount) +
-				' WHERE id = ' +
-				msg.author.id +
-				' AND money >= ' +
-				amount +
-				';';
-			result = await p.query(sql);
-			p.logger.incr('cowoncy', win - amount, { type: 'slots' }, p.msg);
-			p.logger.incr('gamble', logging, { type: 'slots' }, p.msg);
+		const mutation = await mongoNumeric.changeIfAtLeast(
+			balances,
+			{ id: String(msg.author.id) },
+			'money',
+			amount,
+			win - amount
+		);
+		if (!mutation.matchedCount) {
+			p.send('**🚫 | ' + p.getName() + "**, You don't have enough cowoncy!", 3000);
+			return;
+		}
+		p.logger.incr('cowoncy', win - amount, { type: 'slots' }, p.msg);
+		p.logger.incr('gamble', logging, { type: 'slots' }, p.msg);
 
-			//Display slots
-			let machine =
+		let machine =
+			'**  `___SLOTS___`**\n` ` ' +
+			moving +
+			' ' +
+			moving +
+			' ' +
+			moving +
+			' ` ` ' +
+			p.getName() +
+			' bet <:cowoncy:416043450337853441> ' +
+			p.global.toFancyNum(amount) +
+			'\n  `|         |`\n  `|         |`';
+		machine = alterSlot.alter(p.msg.author.id, machine);
+		let message = await p.send(machine);
+		setTimeout(async function () {
+			machine =
 				'**  `___SLOTS___`**\n` ` ' +
-				moving +
+				rslots[0] +
 				' ' +
 				moving +
 				' ' +
@@ -155,7 +170,7 @@ module.exports = new CommandInterface({
 				p.global.toFancyNum(amount) +
 				'\n  `|         |`\n  `|         |`';
 			machine = alterSlot.alter(p.msg.author.id, machine);
-			let message = await p.send(machine);
+			await message.edit(machine);
 			setTimeout(async function () {
 				machine =
 					'**  `___SLOTS___`**\n` ` ' +
@@ -163,7 +178,7 @@ module.exports = new CommandInterface({
 					' ' +
 					moving +
 					' ' +
-					moving +
+					rslots[2] +
 					' ` ` ' +
 					p.getName() +
 					' bet <:cowoncy:416043450337853441> ' +
@@ -176,38 +191,22 @@ module.exports = new CommandInterface({
 						'**  `___SLOTS___`**\n` ` ' +
 						rslots[0] +
 						' ' +
-						moving +
+						rslots[1] +
 						' ' +
 						rslots[2] +
 						' ` ` ' +
 						p.getName() +
 						' bet <:cowoncy:416043450337853441> ' +
 						p.global.toFancyNum(amount) +
-						'\n  `|         |`\n  `|         |`';
+						'\n  `|         |`   and won ' +
+						winmsg +
+						'\n  `|         |`';
 					machine = alterSlot.alter(p.msg.author.id, machine);
-					await message.edit(machine);
-					setTimeout(async function () {
-						machine =
-							'**  `___SLOTS___`**\n` ` ' +
-							rslots[0] +
-							' ' +
-							rslots[1] +
-							' ' +
-							rslots[2] +
-							' ` ` ' +
-							p.getName() +
-							' bet <:cowoncy:416043450337853441> ' +
-							p.global.toFancyNum(amount) +
-							'\n  `|         |`   and won ' +
-							winmsg +
-							'\n  `|         |`';
-						machine = alterSlot.alter(p.msg.author.id, machine);
-						message.edit(machine);
-					}, 1000);
-				}, 700);
-			}, 1000);
+					message.edit(machine);
+				}, 1000);
+			}, 700);
+		}, 1000);
 
-			p.quest('gamble');
-		}
+		p.quest('gamble');
 	},
 });

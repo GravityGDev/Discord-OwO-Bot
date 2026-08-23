@@ -28,33 +28,34 @@ module.exports = new CommandInterface({
 
 	execute: async function (p) {
 		const author = p.opt?.author || p.msg.author;
-		let sql = `SELECT u1.id as user1,u2.id as user2 FROM user_battle
-				LEFT JOIN user u1 ON user_battle.user1 = u1.uid
-				LEFT JOIN user u2 ON user_battle.user2 = u2.uid
-			WHERE
-				TIMESTAMPDIFF(MINUTE,time,NOW()) < 10 AND (
-					u1.id = ${author.id} OR
-					u2.id = ${author.id}
-				);`;
-		sql += `UPDATE user_battle SET time = '2018-01-01' WHERE
-			TIMESTAMPDIFF(MINUTE,time,NOW()) < 10 AND (
-				user1 = (SELECT uid FROM user WHERE id = ${author.id}) OR
-				user2 = (SELECT uid FROM user WHERE id = ${author.id})
-			);`;
-		let result = await p.query(sql);
+		const uid = await p.global.getUid(author.id);
+		const battles = await p.mongo.collection('user_battle');
+		const cutoff = new Date(Date.now() - 10 * 60 * 1000);
+		const battle = await battles.findOne({
+			time: { $gt: cutoff },
+			$or: [{ user1: uid }, { user2: uid }],
+		});
 
-		if (!result[0][0] || result[1].changedRows == 0) {
+		if (!battle) {
 			p.errorMsg(', You do not have any pending battles!', 3000);
 			return;
 		}
 
-		/* Get opponent name */
-		let user = result[0][0];
-		if (user.user1 == author.id) user = user.user2;
-		else user = user.user1;
-		user = await p.fetch.getUser(user);
-		if (!user) user = 'an opponent';
+		const result = await battles.updateOne(
+			{ _id: battle._id, time: { $gt: cutoff } },
+			{ $set: { time: new Date('2018-01-01T00:00:00.000Z') } }
+		);
+		if (!result.modifiedCount) {
+			p.errorMsg(', You do not have any pending battles!', 3000);
+			return;
+		}
 
-		p.replyMsg('⚔️', `, You have declined your battle with **${user.username}**`);
+		const opponentUid = battle.user1 == uid ? battle.user2 : battle.user1;
+		const users = await p.mongo.collection('user');
+		const opponentRecord = await users.findOne({ uid: opponentUid }, { projection: { id: 1 } });
+		let opponent = opponentRecord?.id ? await p.fetch.getUser(String(opponentRecord.id)) : null;
+		const opponentName = opponent ? opponent.username : 'an opponent';
+
+		p.replyMsg('⚔️', `, You have declined your battle with **${opponentName}**`);
 	},
 });

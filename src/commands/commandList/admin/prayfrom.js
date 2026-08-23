@@ -47,30 +47,36 @@ async function banList(p) {
 		return;
 	}
 
+	userid = String(userid);
 	min = parseInt(min);
 	let user = await p.fetch.getUser(userid);
 	let username = user ? user.username : userid;
 
-	let sql = `SELECT receiver FROM user_pray WHERE sender = ${userid} AND count >= ${min};`;
-	let result = await p.query(sql);
-	if (!result || result.length == 0) {
+	const prayers = await p.mongo.collection('user_pray');
+	const result = await prayers
+		.find({ sender: userid, count: { $gte: min } }, { projection: { receiver: 1 } })
+		.toArray();
+	if (!result.length) {
 		p.errorMsg(', no users found', 3000);
 		return;
 	}
-	let bans = [userid];
-	for (let i in result) {
-		bans.push(result[i].receiver);
-	}
+	let bans = [userid, ...result.map((row) => String(row.receiver))];
 	let count = bans.length;
-	const bansSql = '(' + bans.join(',99999),(') + ',99999)';
-	sql = `INSERT IGNORE INTO timeout (id,penalty) VALUES ${bansSql} ON DUPLICATE KEY UPDATE penalty = 99999;`;
-	await p.query(sql);
+	const timeout = await p.mongo.collection('timeout');
+	await timeout.bulkWrite(
+		bans.map((id) => ({
+			updateOne: {
+				filter: { id },
+				update: { $set: { penalty: 99999 }, $setOnInsert: { id } },
+				upsert: true,
+			},
+		})),
+		{ ordered: false }
+	);
 
 	if (user) {
 		try {
-			await (
-				await user.getDMChannel()
-			).createMessage('Your accounts has been banned for abusing pray/curse');
+			await (await user.getDMChannel()).createMessage('Your accounts has been banned for abusing pray/curse');
 		} catch (e) {
 			p.replyMsg(
 				banEmoji,
@@ -83,9 +89,7 @@ async function banList(p) {
 	let userList = '';
 	for (let i in bans) {
 		userList += bans[i] + ', ';
-		if (!((parseInt(i) + 1) % 10) && i + 1 != bans.length) {
-			userList += '\n';
-		}
+		if (!((parseInt(i) + 1) % 10) && i + 1 != bans.length) userList += '\n';
 	}
 	userList = userList.slice(0, -2);
 	const userListBuffer = Buffer.from(userList, 'utf8');
@@ -103,20 +107,19 @@ async function displayList(p) {
 		p.errorMsg(', Invalid user id!', 3000);
 		return;
 	}
+	userid = String(userid);
 
 	let user = await p.fetch.getUser(userid);
 	let username = user ? user.username : userid;
-
-	let page = 0;
-	let sql = `SELECT COUNT(*) AS count FROM user_pray WHERE sender = ${userid}`;
-	let result = await p.query(sql);
-
-	if (!result[0] || !result[0].count || result[0].count == 0) {
+	const prayers = await p.mongo.collection('user_pray');
+	const count = await prayers.countDocuments({ sender: userid });
+	if (!count) {
 		p.errorMsg(', ' + username + " hasn't prayed to anyone!", 3000);
 		return;
 	}
 
-	let maxPage = Math.ceil(result[0].count / 15);
+	let page = 0;
+	let maxPage = Math.ceil(count / perPage);
 	let opt = { id: userid, username, avatar: user ? user.avatarURL : null };
 	let embed = await getPage(p, opt, page, maxPage);
 	let msg = await p.send(embed);
@@ -145,34 +148,27 @@ async function displayList(p) {
 	});
 	collector.on('end', async function (_collected) {
 		embed.embed.color = 6381923;
-		await msg.edit({
-			content: 'This message is now inactive',
-			embed: embed.embed,
-		});
+		await msg.edit({ content: 'This message is now inactive', embed: embed.embed });
 	});
 }
 
 async function getPage(p, user, page, maxPage) {
 	let desc = '';
-	let sql = `SELECT * FROM user_pray WHERE sender = ${user.id} LIMIT ${perPage} OFFSET ${
-		page * perPage
-	};`;
-	let result = await p.query(sql);
-	for (let i in result) {
-		let prayer = result[i];
-		desc +=
-			'`' + prayer.receiver + '` | `' + prayer.count + '` | `' + toDate(prayer.latest) + '`\n';
+	const prayers = await p.mongo.collection('user_pray');
+	const result = await prayers
+		.find({ sender: user.id })
+		.sort({ latest: -1, _id: -1 })
+		.skip(page * perPage)
+		.limit(perPage)
+		.toArray();
+	for (let prayer of result) {
+		desc += '`' + prayer.receiver + '` | `' + prayer.count + '` | `' + toDate(prayer.latest) + '`\n';
 	}
 	let embed = {
-		author: {
-			name: 'List of users who ' + user.username + ' prayed to',
-			icon_url: user.avatar,
-		},
+		author: { name: 'List of users who ' + user.username + ' prayed to', icon_url: user.avatar },
 		description: desc,
 		color: p.config.embed_color,
-		footer: {
-			text: 'Page ' + (page + 1) + '/' + maxPage + '',
-		},
+		footer: { text: 'Page ' + (page + 1) + '/' + maxPage + '' },
 	};
 	return { embed };
 }

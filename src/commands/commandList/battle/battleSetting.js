@@ -7,8 +7,6 @@
 
 const CommandInterface = require('../../CommandInterface.js');
 
-const battleUtil = require('./util/battleUtil.js');
-
 module.exports = new CommandInterface({
 	alias: ['battlesetting', 'bs', 'battlesettings'],
 
@@ -34,10 +32,41 @@ module.exports = new CommandInterface({
 	},
 });
 
-async function display(p) {
-	let settings = await battleUtil.getBattleSetting.bind(p)();
+async function getSettings(p) {
+	const uid = await p.global.getUid(p.msg.author.id);
+	const collection = await p.mongo.collection('battle_settings');
+	const result = await collection.findOne({ uid });
 
-	//let text = (settings.showLogs?"~~":"")+"**Auto = ** `"+settings.auto+"`"+(settings.showLogs?"~~":"")+"\n";
+	const settings = {
+		auto: true,
+		display: 'image',
+		speed: 'short',
+		showLogs: false,
+	};
+
+	if (!result) return settings;
+
+	if (result.speed == 0) settings.speed = 'instant';
+	else if (result.speed == 2) settings.speed = 'lengthy';
+
+	if (result.display == 'text') settings.display = 'text';
+	else if (result.display == 'compact') settings.display = 'compact';
+
+	if (result.logs == 1) {
+		settings.showLogs = true;
+		settings.auto = true;
+		settings.speed = 'instant';
+	} else if (result.logs == 2) {
+		settings.showLogs = 'link';
+		settings.auto = true;
+	}
+
+	return settings;
+}
+
+async function display(p) {
+	const settings = await getSettings(p);
+
 	let text = '**Display = ** `' + settings.display + '`\n';
 	text += '**Speed = ** `' + settings.speed + '`';
 	text += '\n**Logs = ** `' + settings.showLogs + '`';
@@ -69,11 +98,11 @@ async function changeSettings(p) {
 	if (args[0] == 'display') {
 		field = 'display';
 		if (args[1] == 'image') {
-			setting = "'image'";
+			setting = 'image';
 		} else if (args[1] == 'text') {
-			setting = "'text'";
+			setting = 'text';
 		} else if (args[1] == 'compact') {
-			setting = "'compact'";
+			setting = 'compact';
 		} else {
 			p.errorMsg(', the display settings can only be `image`, `compact`, or `text`!');
 			return;
@@ -107,17 +136,9 @@ async function changeSettings(p) {
 		return;
 	}
 
-	let sql = `INSERT IGNORE INTO battle_settings (uid,${field}) VALUES
-		((SELECT uid FROM user WHERE id = ${p.msg.author.id}),
-		 ${setting})
-		ON DUPLICATE KEY UPDATE
-			${field} = ${setting};`;
+	const uid = await p.global.getUid(p.msg.author.id);
+	const settings = await p.mongo.collection('battle_settings');
+	await settings.updateOne({ uid }, { $set: { [field]: setting } }, { upsert: true });
 
-	let result = await p.query(sql);
-	if (result.affectedRows == 0) {
-		sql = `INSERT IGNORE INTO user (id,count) VALUES (${p.msg.author.id},0); ${sql}`;
-		result = await p.query(sql);
-	}
-
-	display(p);
+	await display(p);
 }

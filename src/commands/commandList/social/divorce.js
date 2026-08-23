@@ -37,30 +37,23 @@ module.exports = new CommandInterface({
 	cooldown: 3000,
 
 	execute: async function (p) {
-		// Grab marriage information
 		const uid = await p.global.getUid(p.msg.author.id);
-		let sql = `SELECT
-				TIMESTAMPDIFF(DAY, marriedDate, NOW()) as days,
-				marriage.* 
-			FROM marriage 
-			WHERE uid1 = ${uid} OR uid2 = ${uid};`;
+		const marriages = await p.mongo.collection('marriage');
+		const marriage = await marriages.findOne({ $or: [{ uid1: uid }, { uid2: uid }] });
 
-		let result = await p.query(sql);
-
-		if (result.length < 1) {
+		if (!marriage) {
 			p.errorMsg(", you can't divorce if you aren't married, silly butt!", 3000);
 			return;
 		}
 
-		// Grab user and ring information
-		let ring = rings[result[0].rid];
-		let so = uid == result[0].uid1 ? result[0].uid2 : result[0].uid1;
-		sql = `SELECT id FROM user WHERE uid = ${so}`;
-		const result2 = await p.query(sql);
-		so = result2[0].id;
-		so = await p.fetch.getUser(so);
+		let ring = rings[marriage.rid];
+		let soUid = uid == marriage.uid1 ? marriage.uid2 : marriage.uid1;
+		const users = await p.mongo.collection('user');
+		const storedPartner = await users.findOne({ uid: soUid }, { projection: { id: 1 } });
+		const so = storedPartner?.id ? await p.fetch.getUser(String(storedPartner.id)) : null;
+		const marriedDate = new Date(marriage.marriedDate);
+		const days = Math.max(0, Math.floor((Date.now() - marriedDate.getTime()) / 86400000));
 
-		// Ask for confirmation
 		let embed = {
 			author: {
 				name:
@@ -69,11 +62,11 @@ module.exports = new CommandInterface({
 			},
 			description:
 				'You married on **' +
-				new Date(result[0].marriedDate).toLocaleDateString('default', dateOptions) +
+				marriedDate.toLocaleDateString('default', dateOptions) +
 				'** and have been married for **' +
-				result[0].days +
+				days +
 				'** days and claimed **' +
-				result[0].dailies +
+				(marriage.dailies || 0) +
 				'** dailies together... Once you divorce, the ring will break and disappear.',
 			thumbnail: {
 				url:
@@ -86,30 +79,29 @@ module.exports = new CommandInterface({
 		};
 		let msg = await p.send({ embed });
 
-		// Add reaction collector
 		await msg.addReaction(yes);
 		await msg.addReaction(no);
 		let filter = (emoji, userID) =>
 			(emoji.name === yes || emoji.name === no) && userID === p.msg.author.id;
 		let collector = p.reactionCollector.create(msg, filter, { time: 60000 });
 		let reacted = false;
-		collector.on('collect', (emoji) => {
+		collector.on('collect', async (emoji) => {
 			if (reacted) return;
 			reacted = true;
 			if (emoji.name == yes) {
-				embed.description =
-					embed.description + '\n\n ' + heartBreak + ' You have decided to divorce.';
+				const removed = await marriages.deleteOne({ uid1: marriage.uid1, uid2: marriage.uid2 });
+				if (removed.deletedCount) {
+					embed.description += '\n\n ' + heartBreak + ' You have decided to divorce.';
+				} else {
+					embed.description += '\n\n 🚫 This marriage no longer exists.';
+				}
 				collector.stop();
-				let sql = `DELETE FROM marriage WHERE uid1 = (SELECT uid FROM user WHERE id = ${p.msg.author.id}) OR uid2 = (SELECT uid FROM user WHERE id = ${p.msg.author.id});`;
-				p.query(sql);
 			} else {
-				embed.description =
-					embed.description + '\n\n ' + heartBeat + ' You have decided to stay married!';
+				embed.description += '\n\n ' + heartBeat + ' You have decided to stay married!';
 				collector.stop();
 			}
 		});
 
-		// Once reaction collector ends, change color of embed message
 		collector.on('end', async function (_collected) {
 			embed.color = 6381923;
 			await msg.edit({ embed });

@@ -5,12 +5,13 @@
  * For more information, see README.md and LICENSE
  */
 
+const path = require('path');
 const CommandInterface = require('../../CommandInterface.js');
 
 const mathEmoji = '<a:naruhodo:593971680737624065>';
 
 const workerpool = require('workerpool');
-const pool = workerpool.pool(__dirname + '/mathWorker.js');
+const workerPath = path.join(__dirname, 'mathWorker.js');
 
 module.exports = new CommandInterface({
 	alias: ['math', 'calc', 'calculate'],
@@ -32,6 +33,8 @@ module.exports = new CommandInterface({
 	six: 500,
 
 	execute: function (p) {
+		// Give each calculation an isolated worker and close it after the request.
+		const pool = workerpool.pool(workerPath, { maxWorkers: 1 });
 		// quick and dirty fix for function calls and tags
 		let expression = p.args.join(' ').replace(/\.(?=[a-zA-Z_]+\()/gm, '\\.');
 		pool
@@ -57,12 +60,12 @@ module.exports = new CommandInterface({
 				else p.replyMsg(mathEmoji, p.replaceMentions(', the answer is: **' + result + '**'));
 			})
 			.catch(function (err) {
-				if (err.message == 'Promise timed out after 1000 ms')
+				if (err.message == 'Promise timed out after 3000 ms')
 					p.errorMsg(', that expression is too difficult for me... :c', 3000);
 				else p.errorMsg("... I don't think that's an expression silly head", 3000);
 			})
 			.then(function () {
-				pool.terminate();
+				return pool.terminate();
 			});
 	},
 });

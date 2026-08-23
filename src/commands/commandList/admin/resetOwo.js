@@ -24,45 +24,37 @@ module.exports = new CommandInterface({
 			return;
 		}
 
-		let sql = `SELECT count FROM user WHERE id = ${p.args[0]};
-			UPDATE user SET count = 0 WHERE id = ${p.args[0]};
-			SELECT count FROM guild WHERE id = ${p.args[0]};
-			UPDATE guild SET count = 0 WHERE id = ${p.args[0]};`;
-		let result = await p.query(sql);
+		const id = String(p.args[0]);
+		const users = await p.mongo.collection('user');
+		const guilds = await p.mongo.collection('guild');
+		const storedUser = await users.findOne({ id }, { projection: { count: 1 } });
+		const storedGuild = await guilds.findOne({ id }, { projection: { count: 1 } });
 
-		let count;
-		if (result[0].length) {
-			count = result[0][0].count;
-		} else if (result[2].length) {
-			count = result[2][0].count;
-			const guild = await p.fetch.getGuild(p.args[0]);
-			const guildName = guild ? guild.name : p.args[0];
+		if (storedUser) {
+			await users.updateOne({ id }, { $set: { count: 0 } });
+		} else if (storedGuild) {
+			await guilds.updateOne({ id }, { $set: { count: 0 } });
+			const guild = await p.fetch.getGuild(id);
+			const guildName = guild ? guild.name : id;
 			return p.send(
-				`📨 **|** Successfully reset owo count for **${guildName}**\n${p.config.emoji.blank} **|** Previously had: ${count} owos`
+				`📨 **|** Successfully reset owo count for **${guildName}**\n${p.config.emoji.blank} **|** Previously had: ${storedGuild.count || 0} owos`
 			);
 		} else {
-			return p.send(`⚠ **|** Failed to reset owo count for ${p.args[0]}`);
+			return p.send(`⚠ **|** Failed to reset owo count for ${id}`);
 		}
 
+		const count = storedUser.count || 0;
 		let warn = p.args.slice(1).join(' ');
-		let user = await p.sender.msgUser(
-			p.args[0],
-			'**⚠ |** Your owo count has been reset due to: **' + warn + '**'
-		);
-		if (user && !user.dmError && count) {
+		let user = await p.sender.msgUser(id, '**⚠ |** Your owo count has been reset due to: **' + warn + '**');
+		if (user && !user.dmError) {
 			p.send(
-				`📨 **|** Successfully reset owo count for **${p.getUniqueName(user)}**\n${
-					p.config.emoji.blank
-				} **|** Previously had: ${count} owos`
-			);
-		} else if (count) {
-			p.send(
-				`⚠ **|** Successfully reset owo count for **${p.getUniqueName(user)}**\n${
-					p.config.emoji.blank
-				} **|** Previously had: ${count} owos**\n${p.config.emoji.blank} **|** I couldn't DM them.`
+				`📨 **|** Successfully reset owo count for **${p.getUniqueName(user)}**\n${p.config.emoji.blank} **|** Previously had: ${count} owos`
 			);
 		} else {
-			p.send(`⚠ **|** Failed to reset owo count for ${p.args[0]}`);
+			const label = user ? p.getUniqueName(user) : id;
+			p.send(
+				`⚠ **|** Successfully reset owo count for **${label}**\n${p.config.emoji.blank} **|** Previously had: ${count} owos\n${p.config.emoji.blank} **|** I couldn't DM them.`
+			);
 		}
 	},
 });

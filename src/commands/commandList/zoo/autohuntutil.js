@@ -5,7 +5,7 @@
  * For more information, see README.md and LICENSE
  */
 
-const mysql = require('../../../botHandlers/mysqlHandler.js');
+const mongo = require('../../../utils/mongo.js');
 let macro;
 try {
 	macro = require('../../../../../tokens/macro.js');
@@ -40,13 +40,6 @@ const bots = [
 let totalBots = 4000000;
 setInterval(updateTotal, 60 * 60 * 1000);
 updateTotal();
-
-//test(traits.efficiency);
-//test(traits.duration);
-//test(traits.cost);
-//test(traits.exp);
-//test(traits.gain);
-//test(traits.radar);
 
 exports.getLvl = function (xp, gain, traitName) {
 	let totalxp = 0;
@@ -122,22 +115,11 @@ exports.getBot = function (result) {
 
 	let percent = ((totalBots - rank) / totalBots) * 100;
 
-	if (percent <= 43.85)
-		// Common 43.85%
-		return bots[0];
-	else if (percent <= 78.85)
-		// Uncommon 35%
-		return bots[1];
-	else if (percent <= 98.85)
-		// Rare 20%
-		return bots[2];
-	else if (percent <= 99.85)
-		// Epic 1%
-		return bots[3];
-	else if (percent <= 99.95)
-		// Mythical 0.1%
-		return bots[4];
-	// Legendary 0.05%
+	if (percent <= 43.85) return bots[0];
+	else if (percent <= 78.85) return bots[1];
+	else if (percent <= 98.85) return bots[2];
+	else if (percent <= 99.85) return bots[3];
+	else if (percent <= 99.95) return bots[4];
 	else return bots[5];
 };
 
@@ -146,10 +128,11 @@ exports.getTotalBots = function () {
 };
 
 async function updateTotal() {
-	//Update total bots every hour
-	const sql = `SELECT COUNT(id) AS total FROM autohunt;`;
-	const result = await mysql.query(sql);
-	if (result[0]?.total) {
-		totalBots = result[0].total;
+	try {
+		const collection = await mongo.collection('autohunt');
+		const total = await collection.countDocuments({});
+		if (total > 0) totalBots = total;
+	} catch (err) {
+		console.error('Failed to refresh huntbot total', err);
 	}
 }

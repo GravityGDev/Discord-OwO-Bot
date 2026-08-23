@@ -1,0 +1,223 @@
+name: MongoDB migration checks
+
+on:
+  push:
+    branches:
+      - mongodb-migration
+  pull_request:
+    branches:
+      - master
+
+permissions:
+  contents: write
+
+jobs:
+  migration-checks:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout migration branch
+        uses: actions/checkout@v4
+        with:
+          ref: mongodb-migration
+
+      - name: Use Node.js 24 LTS
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Refresh package-lock.json
+        run: npm install --package-lock-only --ignore-scripts --no-audit --no-fund
+
+      - name: Syntax check MongoDB migration files
+        run: |
+          node --check src/owo.js
+          node --check src/utils/mongo.js
+          node --check src/utils/mongoCounters.js
+          node --check src/utils/mongoNumeric.js
+          node --check src/utils/redis.js
+          node --check src/utils/pubsub.js
+          node --check src/utils/cacheUtil.js
+          node --check src/utils/ban.js
+          node --check src/utils/weaponMongoPersistence.js
+          node --check src/utils/rewardUtil.js
+          node --check src/utils/eventUtil.js
+          node --check src/utils/giveaway.js
+          node --check src/utils/animalInfoUtil.js
+          node --check src/utils/logger.js
+          node --check src/utils/InfoUpdater.js
+          node --check src/utils/streamSocket.js
+          node --check src/utils/snailSocket.js
+          node --check src/botHandlers/questHandler.js
+          node --check src/botHandlers/patreonHandler.js
+          node --check src/commands/command.js
+          node --check src/commands/commandList/ranking/rankingMongoUtil.js
+          node --check src/commands/commandList/ranking/top.js
+          node --check src/commands/commandList/ranking/me.js
+          node --check src/commands/commandList/zoo/animalUtil.js
+          node --check src/commands/commandList/zoo/lootboxUtil.js
+          node --check src/commands/commandList/utils/rules.js
+          node --check src/commands/commandList/utils/disable.js
+          node --check src/commands/commandList/utils/enable.js
+          node --check src/commands/commandList/utils/utils/enabledUtil.js
+          node --check src/commands/commandList/economy/cowoncy.js
+          node --check src/commands/commandList/economy/give.js
+          node --check src/commands/commandList/economy/utils/cowoncyUtils.js
+          node --check src/commands/commandList/battle/WeaponInterface.js
+          node --check src/commands/commandList/battle/util/weaponUtil.js
+          node --check src/commands/commandList/patreon/alterBattle.js
+          node --check scripts/migrate-mysql-to-mongodb.js
+          node --check scripts/migrate-redis-to-mongodb.js
+          node --check scripts/audit-mongodb-cutover.js
+          node --check scripts/audit-owner-id.js
+          node --check scripts/smoke-mongo-runtime.js
+          node --check scripts/smoke-module-load.js
+          node --check scripts/seed-mongodb-static.js
+          node --check scripts/preflight-runtime.js
+
+      - name: Check circular dependencies
+        run: npx -p dpdm@3.13.1 dpdm --exit-code circular:1 ./src/owo.js
+
+      - name: Enforce MongoDB-only runtime
+        run: node scripts/audit-mongodb-cutover.js --strict
+
+      - name: Enforce centralized owner Discord ID
+        run: node scripts/audit-owner-id.js
+
+      - name: Commit lockfile when changed
+        if: github.event_name == 'push'
+        shell: bash
+        run: |
+          if git diff --quiet -- package-lock.json; then
+            echo "package-lock.json is already current"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add package-lock.json
+          git commit -m "Update package lock for Node 24 MongoDB runtime"
+          git push origin HEAD:mongodb-migration
+
+  dependency-install-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout migration branch
+        uses: actions/checkout@v4
+        with:
+          ref: mongodb-migration
+
+      - name: Use Node.js 24 LTS
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Verify a fresh dependency install resolves
+        run: npm install --ignore-scripts --no-audit --no-fund
+
+  dependency-build-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout migration branch
+        uses: actions/checkout@v4
+        with:
+          ref: mongodb-migration
+
+      - name: Use Node.js 24 LTS
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Install native build prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential python3 libcairo2-dev libpango1.0-dev libjpeg-dev libgif-dev librsvg2-dev
+
+      - name: Verify native runtime dependencies build
+        run: npm install --no-audit --no-fund
+
+      - name: Verify required native modules load
+        run: node -e "require('canvas'); console.log('Native modules loaded')"
+
+      - name: Verify OwO runtime module tree loads
+        run: node scripts/smoke-module-load.js
+
+  mongo-runtime-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout migration branch
+        uses: actions/checkout@v4
+        with:
+          ref: mongodb-migration
+
+      - name: Use Node.js 24 LTS
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Install isolated MongoDB driver dependencies
+        run: npm install --prefix /tmp/owo-mongo-deps --ignore-scripts --no-audit --no-fund mongodb@5.9.2 dotenv@10.0.0
+
+      - name: Start MongoDB replica set
+        shell: bash
+        run: |
+          docker run -d --name owo-mongo-smoke -p 27017:27017 mongo:6.0 --replSet rs0 --bind_ip_all
+
+          ready=0
+          for i in {1..60}; do
+            if docker exec owo-mongo-smoke mongosh --quiet --eval "db.adminCommand('ping').ok" 2>/dev/null | grep -q '^1$'; then
+              ready=1
+              break
+            fi
+            sleep 1
+          done
+          if [ "$ready" != "1" ]; then
+            docker logs owo-mongo-smoke
+            exit 1
+          fi
+
+          docker exec owo-mongo-smoke mongosh --quiet --eval 'rs.initiate({_id:"rs0",members:[{_id:0,host:"localhost:27017"}]})'
+
+          primary=0
+          for i in {1..60}; do
+            if docker exec owo-mongo-smoke mongosh --quiet --eval 'try { rs.status().myState } catch (e) { 0 }' 2>/dev/null | grep -q '^1$'; then
+              primary=1
+              break
+            fi
+            sleep 1
+          done
+          if [ "$primary" != "1" ]; then
+            docker logs owo-mongo-smoke
+            exit 1
+          fi
+
+      - name: Seed base MongoDB reference data
+        env:
+          NODE_PATH: /tmp/owo-mongo-deps/node_modules
+          MONGODB_URI: mongodb://127.0.0.1:27017/owo_smoke?replicaSet=rs0
+          MONGODB_DB: owo_smoke
+          MONGODB_SERVER_SELECTION_TIMEOUT: 10000
+        run: node scripts/seed-mongodb-static.js
+
+      - name: Exercise runtime MongoDB transactions and exact arithmetic
+        env:
+          NODE_PATH: /tmp/owo-mongo-deps/node_modules
+          MONGODB_URI: mongodb://127.0.0.1:27017/owo_smoke?replicaSet=rs0
+          MONGODB_DB: owo_smoke
+          MONGODB_SERVER_SELECTION_TIMEOUT: 10000
+        run: node scripts/smoke-mongo-runtime.js
+
+      - name: Run deployment preflight against replica set
+        env:
+          NODE_PATH: /tmp/owo-mongo-deps/node_modules
+          BOT_TOKEN: ci-placeholder-token
+          MONGODB_URI: mongodb://127.0.0.1:27017/owo_smoke?replicaSet=rs0
+          MONGODB_DB: owo_smoke
+          MONGODB_SERVER_SELECTION_TIMEOUT: 10000
+        run: node scripts/preflight-runtime.js
+
+      - name: Show MongoDB logs on failure
+        if: failure()
+        run: docker logs owo-mongo-smoke || true
+
+      - name: Stop MongoDB smoke container
+        if: always()
+        run: docker rm -f owo-mongo-smoke || true

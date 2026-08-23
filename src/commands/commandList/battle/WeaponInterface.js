@@ -6,7 +6,7 @@
  */
 /* eslint-disable no-unused-vars */
 
-const mysql = require('../../../botHandlers/mysqlHandler.js');
+const weaponMongoPersistence = require('../../../utils/weaponMongoPersistence.js');
 const global = require('../../../utils/global.js');
 const Logs = require('./util/logUtil.js');
 const Tags = require('./util/tags.js');
@@ -576,13 +576,7 @@ module.exports = class WeaponInterface {
 	}
 
 	saveTT() {
-		const currKills = Object.keys(this.currKills).length;
-		if (currKills) {
-			const sql = `UPDATE IGNORE user_weapon_kills
-					SET kills = kills + ${currKills}
-					WHERE uwid = ${this.ruwid};`;
-			return mysql.query(sql);
-		}
+		return weaponMongoPersistence.saveTakedownTracker.call(this);
 	}
 
 	getEmoji(quality) {
@@ -785,69 +779,14 @@ module.exports = class WeaponInterface {
 		return Math.round(res * 100) + '%';
 	}
 
-	/** Saves weapon to the db and return uwid **/
+	/** Saves weapon to MongoDB and returns uwid **/
 	async save(id) {
-		let wear = this.wear?.id || 0;
-
-		const weaponSql = `INSERT INTO user_weapon (uid, wid, stat, avg, rrcount, rrattempt, wear)
-				VALUES (${await global.getUid(id)}, ${this.id},'${this.sqlStat}',${
-			this.avgQuality
-		}, 0, 0, ${wear});`;
-
-		let result = await mysql.query(weaponSql);
-		let uwid = result.insertId;
-		if (!uwid) throw 'Could not save weapon!';
-		this.uwid = uwid;
-
-		let queryUid = [];
-		let passiveSql = '';
-		if (this.passives.length) {
-			passiveSql = 'INSERT INTO user_weapon_passive (uwid,pcount,wpid,stat) VALUES ';
-			for (let i = 0; i < this.passives.length; i++) {
-				let tempPassive = this.passives[i];
-				passiveSql += `(?,${i},${tempPassive.id},'${tempPassive.sqlStat}'),`;
-				queryUid.push(uwid);
-			}
-			passiveSql = `${passiveSql.slice(0, -1)};`;
-		}
-		let trackSql = '';
-		if (this.hasTT) {
-			trackSql = `INSERT INTO user_weapon_kills (uwid) VALUES (?);`;
-			queryUid.push(uwid);
-		}
-		if (queryUid.length) {
-			await mysql.query(passiveSql + trackSql, queryUid);
-		}
-		return uwid;
+		return weaponMongoPersistence.saveWeapon.call(this, id);
 	}
 
-	/** Update weapon in db **/
+	/** Update weapon in MongoDB **/
 	async update() {
-		// update rr count/attempt/wear
-		let sql = `UPDATE user_weapon
-				SET
-					stat = '${this.sqlStat}',
-					avg = ${this.avgQuality},
-					wear = ${this.wear.id},
-					rrattempt = ${this.rrAttempt},
-					rrcount = ${this.rrCount}
-				WHERE uwid = ${this.ruwid};`;
-		for (let i in this.passives) {
-			let passive = this.passives[i];
-			let stat = passive.sqlStat;
-			let wpid = passive.id;
-
-			sql += `INSERT INTO user_weapon_passive (uwid,pcount,wpid,stat) VALUES (${this.ruwid}, ${i}, ${wpid}, '${stat}')
-					ON DUPLICATE KEY UPDATE uwid = VALUES(uwid), pcount = VALUES(pcount), wpid = VALUES(wpid), stat = VALUES(stat);`;
-		}
-
-		let result = await mysql.query(sql);
-		for (let i in result) {
-			if (result[i].affectedRows <= 0) {
-				return false;
-			}
-		}
-		return true;
+		return weaponMongoPersistence.updateWeapon.call(this);
 	}
 
 	get shortenUWID() {

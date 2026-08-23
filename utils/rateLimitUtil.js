@@ -9,12 +9,19 @@ const request = require('request');
 let influxErrorShown = false;
 
 exports.init = function (bucket, debug) {
+	if (!process.env.INFLUXDB_HOST) {
+		console.log('[RateLimitMetrics] Disabled; INFLUXDB_HOST is not configured');
+		return;
+	}
+
 	setInterval(() => {
 		logBucket(bucket, debug);
 	}, 10000);
 };
 
 async function logBucket(bucket, debug) {
+	if (!process.env.INFLUXDB_HOST) return;
+
 	const { concurrent, queueCount, bucketCount, waiting } = bucket.getState();
 	const body = {
 		password: process.env.INFLUXDB_PASS,
@@ -26,22 +33,21 @@ async function logBucket(bucket, debug) {
 		waiting,
 	};
 
-	if (debug) {
-		body.debug = true;
-	}
+	if (debug) body.debug = true;
 
 	request(
 		{
 			method: 'POST',
-			uri: `${process.env.INFLUXDB_HOST}/qos`,
+			uri: `${process.env.INFLUXDB_HOST.replace(/\/$/, '')}/qos`,
 			json: true,
-			body: body,
+			body,
+			timeout: 10000,
 		},
 		function (err) {
 			if (err && !influxErrorShown) {
-				console.error('InfluxDB is inactive. Log upload will not work.');
+				console.error('[RateLimitMetrics] InfluxDB is inactive; metric upload disabled until restart.');
+				console.error(err.message);
 				influxErrorShown = true;
-				throw err;
 			}
 		}
 	);

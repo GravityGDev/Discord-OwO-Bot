@@ -7,13 +7,19 @@
 
 const surveyEmoji = '📝';
 const surveyLogChannel = '882521311371485184';
+const legacyClaimDate = new Date('2017-01-01T00:00:00.000Z');
 
 exports.handle = async function (msg, _ack) {
 	const survey = await getSurvey.bind(this)(msg.author.id);
-	if (!survey.length) return;
+	if (!survey) return;
 
-	const currentQuestion = survey.find((question) => question.question_number === question.number);
+	const currentQuestion = survey.questions.find(
+		(question) => survey.state.question_number === question.number
+	);
 	if (!currentQuestion) return;
+
+	const outcome = await sendNextQuestion.bind(this)(msg, survey, currentQuestion);
+	if (!outcome) return;
 
 	const embed = {
 		title: currentQuestion.question,
@@ -25,69 +31,104 @@ exports.handle = async function (msg, _ack) {
 	};
 	this.snailSocket.messageChannel(surveyLogChannel, { embed });
 
-	await sendNextQuestion.bind(this)(msg, survey);
+	if (outcome.nextQuestion) {
+		const text = `**Question ${outcome.nextQuestion.number}:** *${outcome.nextQuestion.question}*`;
+		await this.sender.msgUser(msg.author.id, text);
+	} else if (outcome.completed) {
+		const text = `${surveyEmoji} **|** Thanks for completing the survey! You have received 5 ${this.config.emoji.lootbox} and 5 ${this.config.emoji.crate}`;
+		await this.sender.msgUser(msg.author.id, text);
+	}
 };
 
 async function getSurvey(userId) {
-	const sql = `SELECT us.*, sq.*
-			FROM user u
-				INNER JOIN user_survey us ON u.uid = us.uid
-				INNER JOIN survey_question sq ON sq.sid = us.sid
-			WHERE u.id = ${userId}
-				AND in_progress = 1;`;
-	return (await this.query(sql)) || [];
+	const uid = await this.global.getUid(userId);
+	const userSurvey = await this.mongo.collection('user_survey');
+	const questions = await this.mongo.collection('survey_question');
+	const state = await userSurvey.findOne({ uid, in_progress: 1 });
+	if (!state) return;
+
+	const rows = await questions.find({ sid: state.sid }).sort({ number: 1 }).toArray();
+	if (!rows.length) return;
+	return { state, questions: rows };
 }
 
-async function sendNextQuestion(msg, survey) {
-	const currentQuestion = survey.find((question) => question.question_number === question.number);
-	const { uid, sid, number } = currentQuestion;
-	const nextQuestion = survey.find((question) => number + 1 === question.number);
+async function sendNextQuestion(msg, survey, currentQuestion) {
+	const { uid, sid, question_number: questionNumber } = survey.state;
+	const nextQuestion = survey.questions.find((question) => questionNumber + 1 === question.number);
+	const userSurvey = await this.mongo.collection('user_survey');
+	const lootbox = await this.mongo.collection('lootbox');
+	const crate = await this.mongo.collection('crate');
+	const session = await this.mongo.startSession();
+	let outcome;
 
-	const con = await this.mysqlhandler.startTransaction();
 	try {
-		if (nextQuestion) {
-			const sql = `UPDATE user_survey
-					SET question_number = question_number + 1
-					WHERE uid = ${uid}
-						AND sid = ${sid}
-						AND in_progress = 1
-						AND is_done = 0
-						AND question_number = ${number};`;
-			const result = await con.query(sql);
-			if (result.changedRows) {
-				const text = `**Question ${nextQuestion.number}:** *${nextQuestion.question}*`;
-				await this.sender.msgUser(msg.author.id, text);
-			} else {
-				throw 'Failed to update question';
-			}
-		} else {
-			let sql = `UPDATE user_survey
-					SET question_number = question_number + 1,
-						in_progress = 0,
-						is_done = 1
-					WHERE uid = ${uid}
-						AND sid = ${sid}
-						AND in_progress = 1
-						AND is_done = 0
-						AND question_number = ${number};`;
-			sql += `INSERT INTO lootbox (id, boxcount, claimcount, claim)
-					VALUES (${msg.author.id}, 5, 0, '2017-01-01')
-					ON DUPLICATE KEY UPDATE boxcount = boxcount + 5;`;
-			sql += `INSERT INTO crate (uid, cratetype, boxcount, claimcount, claim)
-					VALUES (${uid}, 0, 5, 0, '2017-01-01')
-					ON DUPLICATE KEY UPDATE boxcount = boxcount + 5;`;
-			const result = await con.query(sql);
-			if (result[0].changedRows) {
-				const text = `${surveyEmoji} **|** Thanks for completing the survey! You have received 5 ${this.config.emoji.lootbox} and 5 ${this.config.emoji.crate}`;
-				await this.sender.msgUser(msg.author.id, text);
-			} else {
-				throw 'Failed to give rewards';
-			}
-		}
+		await session.withTransaction(async () => {
+			outcome = undefined;
+			const filter = {
+				uid,
+				sid,
+				in_progress: 1,
+				is_done: { $ne: 1 },
+				question_number: currentQuestion.number,
+			};
 
-		con.commit();
+			if (nextQuestion) {
+				const changed = await userSurvey.updateOne(
+					filter,
+					{ $set: { question_number: nextQuestion.number } },
+					{ session }
+				);
+				if (changed.modifiedCount) outcome = { nextQuestion };
+				return;
+			}
+
+			const changed = await userSurvey.updateOne(
+				filter,
+				{
+					$set: {
+						question_number: currentQuestion.number + 1,
+						in_progress: 0,
+						is_done: 1,
+					},
+				},
+				{ session }
+			);
+			if (!changed.modifiedCount) return;
+
+			await lootbox.updateOne(
+				{ id: String(msg.author.id) },
+				{
+					$inc: { boxcount: 5 },
+					$setOnInsert: {
+						id: String(msg.author.id),
+						claimcount: 0,
+						claim: legacyClaimDate,
+						fbox: 0,
+					},
+				},
+				{ upsert: true, session }
+			);
+			await crate.updateOne(
+				{ uid, cratetype: 0 },
+				{
+					$inc: { boxcount: 5 },
+					$setOnInsert: {
+						uid,
+						cratetype: 0,
+						claimcount: 0,
+						claim: legacyClaimDate,
+					},
+				},
+				{ upsert: true, session }
+			);
+			outcome = { completed: true };
+		});
 	} catch (err) {
 		console.error(err);
-		con.rollback();
+		return;
+	} finally {
+		await session.endSession();
 	}
+
+	return outcome;
 }

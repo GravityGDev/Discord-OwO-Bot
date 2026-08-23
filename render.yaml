@@ -1,0 +1,28 @@
+services:
+  - type: worker
+    name: owo-discord-bot
+    runtime: node
+    region: frankfurt
+    branch: mongodb-migration
+    autoDeployTrigger: commit
+    buildCommand: npm ci --no-audit --no-fund
+    preDeployCommand: npm run seed:mongo-static
+    startCommand: npm run start:checked
+    maxShutdownDelaySeconds: 60
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: NODE_VERSION
+        value: 24.19.0
+      - key: BOT_TOKEN
+        sync: false
+      - key: MONGODB_URI
+        sync: false
+      - key: MONGODB_DB
+        value: owo
+      - key: MONGODB_MAX_POOL_SIZE
+        value: "30"
+      - key: MONGODB_MIN_POOL_SIZE
+        value: "0"
+      - key: MONGODB_SERVER_SELECTION_TIMEOUT
+        value: "10000"

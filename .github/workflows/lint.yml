@@ -1,12 +1,11 @@
 name: Lint
 
 on:
-  # Trigger the workflow on push or pull request,
-  # but only for the main branch
   push:
     branches:
       - master
       - private
+      - mongodb-migration
   pull_request:
     branches:
       - master
@@ -18,22 +17,22 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Check out Git repository
-        uses: actions/checkout@v2
+        uses: actions/checkout@v4
 
-      - name: Set up Node.js
-        uses: actions/setup-node@v1
+      - name: Set up Node.js 24 LTS
+        uses: actions/setup-node@v4
         with:
-          node-version: 15.14.0
+          node-version: 24
 
-      # ESLint and Prettier must be in `package.json`
-      - name: Install Node.js dependencies
-        run: rm package.json && mv package-dev.json package.json && npm ci
+      - name: Install lint dependencies
+        run: |
+          cp package-dev.json /tmp/owo-package-dev.json
+          cp /tmp/owo-package-dev.json package.json
+          rm -f package-lock.json
+          npm install --ignore-scripts --no-audit --no-fund
 
-      - name: Run linters
-        uses: wearerequired/lint-action@v2
-        with:
-          eslint: true
-          prettier: true
+      - name: Run ESLint
+        run: npm run lint
 
-      - name: Run Cyclic Dependency check
+      - name: Run cyclic dependency check
         run: ./node_modules/dpdm/lib/bin/dpdm.js --exit-code circular:1 ./src/owo.js

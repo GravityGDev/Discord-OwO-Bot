@@ -65,17 +65,96 @@ module.exports = new CommandInterface({
 });
 
 async function displayWeaponShards(p) {
-	let sql = `SELECT shards.count FROM shards INNER JOIN user ON shards.uid = user.uid WHERE id = ${p.msg.author.id};`;
-	let result = await p.query(sql);
-	let shards = 0;
-	if (result && result[0]) shards = result[0].count;
-	shards = p.global.toFancyNum(shards);
-
+	const uid = await p.global.getUid(p.msg.author.id);
+	const shardsCollection = await p.mongo.collection('shards');
+	const result = await shardsCollection.findOne({ uid });
+	const shards = p.global.toFancyNum(result?.count || 0);
 	p.replyMsg(shardEmoji, `, you currently have **${shards}** Weapon Shards!`);
 }
 
+async function buildWeaponRows(p, weaponRows) {
+	if (!weaponRows.length) return [];
+	const uwids = weaponRows.map((weapon) => weapon.uwid);
+	const passiveCollection = await p.mongo.collection('user_weapon_passive');
+	const trackerCollection = await p.mongo.collection('user_weapon_kills');
+	const passiveRows = await passiveCollection
+		.find({ uwid: { $in: uwids } })
+		.sort({ uwid: 1, pcount: 1 })
+		.toArray();
+	const trackerRows = await trackerCollection.find({ uwid: { $in: uwids } }).toArray();
+	const passiveMap = new Map();
+	const trackerMap = new Map();
+	for (const passive of passiveRows) {
+		if (!passiveMap.has(passive.uwid)) passiveMap.set(passive.uwid, []);
+		passiveMap.get(passive.uwid).push(passive);
+	}
+	for (const tracker of trackerRows) trackerMap.set(tracker.uwid, tracker);
+
+	const rows = [];
+	for (const weapon of weaponRows) {
+		const tracker = trackerMap.get(weapon.uwid);
+		const base = {
+			id: String(p.msg.author.id),
+			uwid: weapon.uwid,
+			wid: weapon.wid,
+			stat: weapon.stat,
+			wear: weapon.wear || 0,
+			rrcount: weapon.rrcount || 0,
+			rrattempt: weapon.rrattempt || 0,
+			favorite: weapon.favorite || 0,
+			pid: weapon.pid,
+			tt: tracker ? weapon.uwid : null,
+			kills: tracker?.kills || 0,
+		};
+		const passives = passiveMap.get(weapon.uwid) || [];
+		if (!passives.length) rows.push(base);
+		else {
+			for (const passive of passives) {
+				rows.push({
+					...base,
+					pcount: passive.pcount,
+					wpid: passive.wpid,
+					pstat: passive.stat,
+				});
+			}
+		}
+	}
+	return rows;
+}
+
+async function dismantleWeapons(p, uid, uwids, shardCount) {
+	if (!uwids.length) return 0;
+	const session = await p.mongo.startSession();
+	try {
+		session.startTransaction();
+		const weapons = await p.mongo.collection('user_weapon');
+		const passives = await p.mongo.collection('user_weapon_passive');
+		const trackers = await p.mongo.collection('user_weapon_kills');
+		const shards = await p.mongo.collection('shards');
+
+		await passives.deleteMany({ uwid: { $in: uwids } }, { session });
+		await trackers.deleteMany({ uwid: { $in: uwids } }, { session });
+		const deleted = await weapons.deleteMany(
+			{ uid, uwid: { $in: uwids }, pid: null },
+			{ session }
+		);
+		if (!deleted.deletedCount) {
+			await session.abortTransaction();
+			return 0;
+		}
+		const totalShards = shardCount * deleted.deletedCount;
+		await shards.updateOne({ uid }, { $inc: { count: totalShards } }, { upsert: true, session });
+		await session.commitTransaction();
+		return totalShards;
+	} catch (err) {
+		if (session.inTransaction()) await session.abortTransaction();
+		throw err;
+	} finally {
+		await session.endSession();
+	}
+}
+
 async function dismantleRank(p, rankLoc) {
-	// (min,max]
 	let min = 0,
 		max = 0;
 	for (let i = 0; i <= rankLoc; i++) {
@@ -87,92 +166,55 @@ async function dismantleRank(p, rankLoc) {
 	max *= 100;
 	let lastRank = rankLoc == WeaponInterface.ranks.length - 1;
 
-	/* Grab the item we will sell */
-	let sql = `SELECT
-			user.uid,
-			a.uwid, a.wid, a.stat, a.rrcount, a.rrattempt, a.wear,
-			b.pcount, b.wpid, b.stat as pstat,
-			c.uwid as tt, c.kills
-		FROM user
-			LEFT JOIN user_weapon a ON user.uid = a.uid
-			LEFT JOIN user_weapon_passive b ON a.uwid = b.uwid
-			LEFT JOIN user_weapon_kills c ON a.uwid = c.uwid
-		WHERE user.id = ${p.msg.author.id} AND avg >${min === 0 ? '=' : ''} ${min} ${
-		lastRank ? '' : `AND avg <= ${max}`
-	} AND a.pid IS NULL AND a.favorite != 1 LIMIT 500;`;
-
-	let result = await p.query(sql);
-
-	/* not a real weapon! */
-	if (!result[0]) {
+	const uid = await p.global.getUid(p.msg.author.id);
+	const filter = {
+		uid,
+		avg: { [min === 0 ? '$gte' : '$gt']: min },
+		pid: null,
+		favorite: { $ne: 1 },
+	};
+	if (!lastRank) filter.avg.$lte = max;
+	const weaponsCollection = await p.mongo.collection('user_weapon');
+	const weaponDocs = await weaponsCollection.find(filter).limit(500).toArray();
+	if (!weaponDocs.length) {
 		p.errorMsg(', you do not have any weapons with this rank!', 3000);
 		return;
 	}
 
-	/* Parse emoji and uwid */
-	let weapon = weaponUtil.parseWeaponQuery(result);
-	let weapons = [];
-	let weaponsSQL = [];
-	let price = weaponUtil.shardPrices[WeaponInterface.ranks[rankLoc][1]];
-	let rank = WeaponInterface.ranks[rankLoc][2] + ' **' + WeaponInterface.ranks[rankLoc][1] + '**';
-	for (var key in weapon) {
-		let tempWeapon = weaponUtil.parseWeapon(weapon[key]);
-		if (!tempWeapon.unsellable) {
-			weapons.push(tempWeapon.emoji);
-			weaponsSQL.push(tempWeapon.ruwid);
+	const rows = await buildWeaponRows(p, weaponDocs);
+	const parsed = weaponUtil.parseWeaponQuery(rows);
+	let weaponEmojis = [];
+	let uwids = [];
+	const shardPrice = weaponUtil.shardPrices[WeaponInterface.ranks[rankLoc][1]];
+	const rank = WeaponInterface.ranks[rankLoc][2] + ' **' + WeaponInterface.ranks[rankLoc][1] + '**';
+	for (const key in parsed) {
+		const weapon = weaponUtil.parseWeapon(parsed[key]);
+		if (weapon && !weapon.unsellable) {
+			weaponEmojis.push(weapon.emoji);
+			uwids.push(weapon.ruwid);
 		}
 	}
-	weaponsSQL = '(' + weaponsSQL.join(',') + ')';
 
-	if (weapons.length <= 0) {
+	if (!uwids.length) {
 		p.errorMsg(', you do not have any weapons with this rank!', 3000);
 		return;
 	}
-
-	if (!price) {
+	if (!shardPrice) {
 		p.errorMsg(', Something went terribly wrong...');
 		return;
 	}
 
-	let uid = await p.global.getUid(p.msg.author.id);
-
-	sql = `DELETE user_weapon_passive FROM user
-		LEFT JOIN user_weapon ON user.uid = user_weapon.uid
-		LEFT JOIN user_weapon_passive ON user_weapon.uwid = user_weapon_passive.uwid
-		WHERE id = ${p.msg.author.id}
-			AND user_weapon_passive.uwid IN ${weaponsSQL}
-			AND user_weapon.pid IS NULL;`;
-	sql += `DELETE user_weapon_kills FROM user
-		LEFT JOIN user_weapon ON user.uid = user_weapon.uid
-		LEFT JOIN user_weapon_kills ON user_weapon.uwid = user_weapon_kills.uwid
-		WHERE id = ${p.msg.author.id}
-			AND user_weapon_kills.uwid IN ${weaponsSQL}
-			AND user_weapon.pid IS NULL;`;
-	sql += `DELETE user_weapon FROM user
-		LEFT JOIN user_weapon ON user.uid = user_weapon.uid
-		WHERE id = ${p.msg.author.id}
-			AND user_weapon.uwid IN ${weaponsSQL}
-			AND user_weapon.pid IS NULL;`;
-
-	result = await p.query(sql);
-
-	/* Check if deleted */
-	if (result[2].affectedRows == 0) {
+	const price = await dismantleWeapons(p, uid, uwids, shardPrice);
+	if (!price) {
 		p.errorMsg(', you do not have a weapon with this id!', 3000);
 		return;
 	}
-
-	/* calculate rewards */
-	price *= result[2].affectedRows;
-
-	sql = `INSERT INTO shards (uid,count) VALUES (${uid},${price}) ON DUPLICATE KEY UPDATE count = count + ${price};`;
-	result = await p.query(sql);
 
 	p.replyMsg(
 		dismantleEmoji,
 		`, You dismantled all of your ${rank} weapons for **${price}** ${shardEmoji} WeaponShards!\n${
 			p.config.emoji.blank
-		} **| Dismantled:** ${weapons.join('')}`
+		} **| Dismantled:** ${weaponEmojis.join('')}`
 	);
 	p.logger.incr('shards', price, { type: 'dismantle' }, p.msg);
 }
@@ -184,69 +226,46 @@ async function dismantleId(p, uwid) {
 		return;
 	}
 
-	/* Grab the item we will sell */
-	const weapon = await weaponUtil.getWeapon(uwid, p.msg.author.id);
-
-	/* not a real weapon! */
-	if (!weapon) {
+	const uid = await p.global.getUid(p.msg.author.id);
+	const weaponsCollection = await p.mongo.collection('user_weapon');
+	const weaponDoc = await weaponsCollection.findOne({ uid, uwid });
+	if (!weaponDoc) {
 		p.errorMsg(', you do not have a weapon with this id!', 3000);
 		return;
 	}
-
-	/* If an animal is using the weapon */
-	if (weapon.animal?.name) {
+	if (weaponDoc.pid != null) {
 		p.errorMsg(', please unequip the weapon to dismantle it!', 3000);
 		return;
 	}
 
-	/* Is this weapon sellable? */
+	const rows = await buildWeaponRows(p, [weaponDoc]);
+	const parsed = weaponUtil.parseWeaponQuery(rows);
+	const key = Object.keys(parsed)[0];
+	const weapon = key ? weaponUtil.parseWeapon(parsed[key]) : null;
+	if (!weapon) {
+		p.errorMsg(', you do not have a weapon with this id!', 3000);
+		return;
+	}
 	if (weapon.unsellable) {
 		p.errorMsg(', This weapon cannot be dismantled!');
 		return;
 	}
-
 	if (weapon.favorite) {
 		p.errorMsg(', unfavorite this weapon to sell!');
 		return;
 	}
 
-	/* Get weapon price */
-	let price = weaponUtil.shardPrices[weapon.rank.name];
-	if (!price) {
+	const shardPrice = weaponUtil.shardPrices[weapon.rank.name];
+	if (!shardPrice) {
 		p.errorMsg(', Something went terribly wrong...');
 		return;
 	}
 
-	let uid = await p.global.getUid(p.msg.author.id);
-
-	let sql = `DELETE user_weapon_passive FROM user
-		LEFT JOIN user_weapon ON user.uid = user_weapon.uid
-		LEFT JOIN user_weapon_passive ON user_weapon.uwid = user_weapon_passive.uwid
-		WHERE id = ${p.msg.author.id}
-			AND user_weapon_passive.uwid = ${uwid}
-			AND user_weapon.pid IS NULL;`;
-	sql += `DELETE user_weapon_kills FROM user
-		LEFT JOIN user_weapon ON user.uid = user_weapon.uid
-		LEFT JOIN user_weapon_kills ON user_weapon.uwid = user_weapon_kills.uwid
-		WHERE id = ${p.msg.author.id}
-			AND user_weapon_kills.uwid = ${uwid}
-			AND user_weapon.pid IS NULL;`;
-	sql += `DELETE user_weapon FROM user
-		LEFT JOIN user_weapon ON user.uid = user_weapon.uid
-		WHERE id = ${p.msg.author.id}
-			AND user_weapon.uwid = ${uwid}
-			AND user_weapon.pid IS NULL;`;
-	let result = await p.query(sql);
-
-	/* Check if deleted */
-	if (result[2].affectedRows == 0) {
+	const price = await dismantleWeapons(p, uid, [uwid], shardPrice);
+	if (!price) {
 		p.errorMsg(', you do not have a weapon with this id!', 3000);
 		return;
 	}
-
-	/* Give shards*/
-	sql = `INSERT INTO shards (uid,count) VALUES (${uid},${price}) ON DUPLICATE KEY UPDATE count = count + ${price};`;
-	result = await p.query(sql);
 
 	p.replyMsg(
 		dismantleEmoji,

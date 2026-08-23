@@ -6,8 +6,9 @@
  */
 
 const CommandInterface = require('../../CommandInterface.js');
-
 const itemUtil = require('./util/itemUtil.js');
+const mongoNumeric = require('../../../utils/mongoNumeric.js');
+
 const thumbsup = '👍';
 const thumbsdown = '👎';
 const tada = '🎉';
@@ -33,7 +34,7 @@ module.exports = new CommandInterface({
 	execute: async function (p) {
 		const info = await validate(p);
 		if (info.error) return;
-		awaitReaction(p, info);
+		await awaitReaction(p, info);
 	},
 });
 
@@ -82,14 +83,12 @@ async function validate(p) {
 			await p.errorMsg(', this item cannot be traded for cowoncy!', 3000);
 			return { error: true };
 		}
-	} else {
-		if (price < 1) {
-			await p.errorMsg(', the price must be greater than 0!', 3000);
-			return { error: true };
-		} else if (price > 2000000) {
-			await p.errorMsg(', the price per ticket is too high!', 3000);
-			return { error: true };
-		}
+	} else if (price < 1) {
+		await p.errorMsg(', the price must be greater than 0!', 3000);
+		return { error: true };
+	} else if (price > 2000000) {
+		await p.errorMsg(', the price per ticket is too high!', 3000);
+		return { error: true };
 	}
 
 	if (!p.global.isInt(count)) {
@@ -102,32 +101,47 @@ async function validate(p) {
 		return { error: true };
 	}
 
-	let sql = `SELECT ui.* FROM user_item ui INNER JOIN user u ON ui.uid = u.uid WHERE u.id = ${p.msg.author.id} AND ui.name = '${item.column}';`;
-	sql += `SELECT id FROM timeout WHERE id = ${user.id} AND TIMESTAMPDIFF(HOUR,time,NOW()) < penalty;`;
-	let result = await p.query(sql);
-	if (!result[0][0] || result[0][0].count < count) {
+	const sellerUid = await p.global.getUid(p.msg.author.id);
+	const buyerUid = await p.global.getUid(user.id);
+	const inventory = await p.mongo.collection('user_item');
+	const timeouts = await p.mongo.collection('timeout');
+	const row = await inventory.findOne({ uid: sellerUid, name: item.column });
+	if (!row || Number(row.count || 0) < count) {
 		await p.errorMsg(`, you do not have enough ${item.name}s!`, 3000);
 		return { error: true };
 	}
-	if (result[1][0]?.id) {
+	if (await isTimedOut(timeouts, user.id)) {
 		await p.errorMsg(', you cannot trade with this user!', 3000);
 		return { error: true };
 	}
-	if (item.tradeLimit) {
-		const afterMid = p.dateUtil.afterMidnight(result[0][0].daily_reset);
-		if (!afterMid.after) {
-			if (result[0][0].daily_count >= item.tradeLimit) {
-				await p.errorMsg(`, you can only trade this item ${item.tradeLimit}x per day!`, 3000);
-				return { error: true };
-			} else if (result[0][0].daily_count + count > item.tradeLimit) {
-				const diff = item.tradeLimit - result[0][0].daily_count;
-				await p.errorMsg(`, you can only trade this item ${diff} more times today!`, 3000);
-				return { error: true };
-			}
-		}
+	const limitError = checkTradeLimit(p, item, row, count);
+	if (limitError) {
+		await p.errorMsg(limitError, 3000);
+		return { error: true };
 	}
 
-	return { item, user, price, count };
+	return { item, user, price, count, sellerUid, buyerUid };
+}
+
+async function isTimedOut(timeouts, id) {
+	const rows = await timeouts.find({ id: String(id) }).toArray();
+	const now = Date.now();
+	return rows.some((row) => {
+		const time = row.time instanceof Date ? row.time.getTime() : new Date(row.time).getTime();
+		return Number.isFinite(time) && now - time < Number(row.penalty || 0) * 3600000;
+	});
+}
+
+function checkTradeLimit(p, item, row, count) {
+	if (!item.tradeLimit) return;
+	if (count > item.tradeLimit) return `, you can only trade this item ${item.tradeLimit}x per day!`;
+	const afterMid = p.dateUtil.afterMidnight(row.daily_reset);
+	if (afterMid.after) return;
+	const current = Number(row.daily_count || 0);
+	if (current >= item.tradeLimit) return `, you can only trade this item ${item.tradeLimit}x per day!`;
+	if (current + count > item.tradeLimit) {
+		return `, you can only trade this item ${item.tradeLimit - current} more times today!`;
+	}
 }
 
 async function sendMessage(p, { item, user, price, count }) {
@@ -135,9 +149,7 @@ async function sendMessage(p, { item, user, price, count }) {
 		description: `Both users must hit the ${thumbsup} reaction to trade.\nEither user can hit the ${thumbsdown} reaction to stop the trade.`,
 		color: p.config.embed_color,
 		timestamp: new Date(),
-		thumbnail: {
-			url: p.global.getEmojiURL(item.emoji),
-		},
+		thumbnail: { url: p.global.getEmojiURL(item.emoji) },
 		author: {
 			name: `${p.getName()} wants to trade with ${p.getName(user)}!`,
 			icon_url: p.msg.author.avatarURL,
@@ -155,9 +167,7 @@ async function sendMessage(p, { item, user, price, count }) {
 			},
 		],
 	};
-	if (item.tradeNote) {
-		embed.description += '\n\n' + item.tradeNote;
-	}
+	if (item.tradeNote) embed.description += '\n\n' + item.tradeNote;
 	if (item.tradeLimit) {
 		embed.description += `\n\n📑 **You can only trade this item ${item.tradeLimit} times per day.**`;
 	}
@@ -171,18 +181,13 @@ async function sendMessage(p, { item, user, price, count }) {
 
 async function awaitReaction(p, info) {
 	const { msg, embed } = await sendMessage(p, info);
-
 	const user1 = p.msg.author.id;
-	let user1Reaction = false;
 	const user2 = info.user.id;
+	let user1Reaction = false;
 	let user2Reaction = false;
-	let filter = (emoji, userId) =>
-		(emoji.name === thumbsup || emoji.name === thumbsdown) &&
-		(userId === user2 || userId === user1);
-	let collector = p.reactionCollector.create(msg, filter, {
-		time: 300000,
-		idle: 300000,
-	});
+	const filter = (emoji, userId) =>
+		(emoji.name === thumbsup || emoji.name === thumbsdown) && (userId === user2 || userId === user1);
+	const collector = p.reactionCollector.create(msg, filter, { time: 300000, idle: 300000 });
 
 	await msg.addReaction(thumbsup);
 	await msg.addReaction(thumbsdown);
@@ -202,7 +207,7 @@ async function awaitReaction(p, info) {
 		}
 		if (user1Reaction && user2Reaction) {
 			collector.stop('done');
-			executeTransaction(p, msg, embed, info);
+			await executeTransaction(p, msg, embed, info);
 		}
 	});
 
@@ -217,115 +222,127 @@ async function awaitReaction(p, info) {
 	});
 }
 
-async function executeTransaction(p, msg, embed, { item, user, price, count }) {
-	const totalPrice = count * price;
-	const uid = await p.global.getUid(p.msg.author.id);
-
-	const con = await p.startTransaction();
-	try {
-		// Check tradelimit
-		if (item.tradeLimit) {
-			if (count > item.tradeLimit) {
-				embed.color = p.config.fail_color;
-				msg.edit({
-					content: `${p.config.emoji.error} **| ${p.getName()}**, you can only trade this item ${
-						item.tradeLimit
-					}x per day!`,
-					embed,
-				});
-				return await con.rollback();
-			}
-
-			let sql = `SELECT * FROM user_item ui WHERE ui.uid = ${uid} AND ui.name = '${item.column}' FOR UPDATE;`;
-			let result = await con.query(sql);
-			const afterMid = p.dateUtil.afterMidnight(result[0].daily_reset);
-
-			if (afterMid.after) {
-				sql = `UPDATE user_item SET daily_count = ${count}, daily_reset = ${afterMid.sql} WHERE user_item.uid = ${uid} AND user_item.name = '${item.column}'`;
-				await con.query(sql);
-			} else {
-				if (result[0].daily_count >= item.tradeLimit) {
-					embed.color = p.config.fail_color;
-					msg.edit({
-						content: `${p.config.emoji.error} **| ${p.getName()}**, you can only trade this item ${
-							item.tradeLimit
-						}x per day!`,
-						embed,
-					});
-					return await con.rollback();
-				} else if (result[0].daily_count + count > item.tradeLimit) {
-					const diff = item.tradeLimit - result[0].daily_count;
-					embed.color = p.config.fail_color;
-					msg.edit({
-						content: `${
-							p.config.emoji.error
-						} **| ${p.getName()}**, you can only trade this item ${diff} more times today!`,
-						embed,
-					});
-					return await con.rollback();
-				} else {
-					sql = `UPDATE user_item SET daily_count = daily_count + ${count} WHERE user_item.uid = ${uid} AND user_item.name = '${item.column}'`;
-					await con.query(sql);
-				}
-			}
+async function executeTransaction(p, msg, embed, info) {
+	const result = await performTrade(p, info);
+	if (!result.ok) {
+		embed.color = p.config.fail_color;
+		let content;
+		if (result.reason === 'money') {
+			content = `${p.config.emoji.error} **| ${p.getName(info.user)}** does not have enough money!`;
+		} else if (result.reason === 'items') {
+			content = `${p.config.emoji.error} **| ${p.getName()}** does not have enough ${info.item.emoji} **${
+				info.item.name
+			}s**!`;
+		} else if (result.reason === 'limit') {
+			content = `${p.config.emoji.error} **| ${p.getName()}**${result.message}`;
+		} else {
+			content = `${p.config.emoji.error} **|** The trade failed. Please try again later.`;
 		}
-
-		let tradeColumn = item.column;
-		if (item.tradeConvert) {
-			tradeColumn = itemUtil.getById(item.tradeConvert).column;
-		}
-
-		let sql = `UPDATE cowoncy SET money = money - ${totalPrice} WHERE id = ${user.id} AND money >= ${totalPrice};`;
-		sql += `UPDATE cowoncy SET money = money + ${totalPrice} WHERE id = ${p.msg.author.id};`;
-		sql += `UPDATE user_item SET count = count - ${count} WHERE uid = ${uid} AND count >= ${count} AND name = '${item.column}';`;
-		sql += `INSERT INTO user_item (uid, name, count) VALUES ((SELECT uid FROM user WHERE user.id = ${user.id}), '${tradeColumn}', ${count}) ON DUPLICATE KEY UPDATE count = count + ${count};`;
-		sql += `INSERT INTO transaction (sender, reciever, amount) VALUES (${user.id}, ${p.msg.author.id}, ${totalPrice});`;
-		let result = await con.query(sql);
-		if (!item.giveOnly && !result[0].changedRows) {
-			embed.color = p.config.fail_color;
-			msg.edit({
-				content: `${p.config.emoji.error} **| ${p.getName(user)}** does not have enough money!`,
-				embed,
-			});
-			await con.rollback();
-			return;
-		} else if (!item.giveOnly && !result[1].changedRows) {
-			embed.color = p.config.fail_color;
-			msg.edit({
-				content: `${
-					p.config.emoji.error
-				} **|** I could not give money to **${p.getName()}**. Please try again later.`,
-				embed,
-			});
-			await con.rollback();
-			return;
-		} else if (!result[2].changedRows) {
-			embed.color = p.config.fail_color;
-			msg.edit({
-				content: `${p.config.emoji.error} **| ${p.getName()}** does not have enough ${
-					item.emoji
-				} **${item.name}s**!`,
-				embed,
-			});
-			await con.rollback();
-			return;
-		} else if (!result[3].affectedRows) {
-			embed.color = p.config.fail_color;
-			msg.edit({
-				content: `${p.config.emoji.error} **|** I could not give tickets to **${user.username}**. Please try again later`,
-				embed,
-			});
-			await con.rollback();
-			return;
-		}
-		await con.commit();
-	} catch (err) {
-		console.error(err);
-		p.errorMsg(', there was an error trading! Please try again later.', 3000);
-		con.rollback();
+		await msg.edit({ content, embed });
 		return;
 	}
 
 	embed.color = p.config.success_color;
-	msg.edit({ content: `${tada} **|** Successfully traded!`, embed });
+	await msg.edit({ content: `${tada} **|** Successfully traded!`, embed });
+}
+
+async function performTrade(p, { item, user, price, count, sellerUid, buyerUid }) {
+	const totalPrice = count * price;
+	const inventory = await p.mongo.collection('user_item');
+	const cowoncy = await p.mongo.collection('cowoncy');
+	const transactions = await p.mongo.collection('transaction');
+	const session = await p.mongo.startSession();
+	let outcome = { ok: false };
+
+	try {
+		await session.withTransaction(async () => {
+			outcome = { ok: false };
+			const sellerItem = await inventory.findOne({ uid: sellerUid, name: item.column }, { session });
+			if (!sellerItem || Number(sellerItem.count || 0) < count) {
+				outcome = { ok: false, reason: 'items' };
+				return;
+			}
+
+			const limitError = checkTradeLimit(p, item, sellerItem, count);
+			if (limitError) {
+				outcome = { ok: false, reason: 'limit', message: limitError };
+				return;
+			}
+
+			if (!item.giveOnly && totalPrice > 0) {
+				const debit = await mongoNumeric.subtractIfEnough(
+					cowoncy,
+					{ id: String(user.id) },
+					'money',
+					totalPrice,
+					{ session }
+				);
+				if (!debit.modifiedCount) {
+					outcome = { ok: false, reason: 'money' };
+					return;
+				}
+				await mongoNumeric.add(
+					cowoncy,
+					{ id: String(p.msg.author.id) },
+					'money',
+					totalPrice,
+					{ upsert: true, session },
+					{ id: String(p.msg.author.id) }
+				);
+			}
+
+			const removed = await inventory.updateOne(
+				{ uid: sellerUid, name: item.column, count: { $gte: count } },
+				{ $inc: { count: -count } },
+				{ session }
+			);
+			if (!removed.modifiedCount) {
+				outcome = { ok: false, reason: 'items' };
+				return;
+			}
+
+			if (item.tradeLimit) {
+				const afterMid = p.dateUtil.afterMidnight(sellerItem.daily_reset);
+				const dailyCount = afterMid.after ? count : Number(sellerItem.daily_count || 0) + count;
+				const set = { daily_count: dailyCount };
+				if (afterMid.after) set.daily_reset = afterMid.now;
+				await inventory.updateOne(
+					{ uid: sellerUid, name: item.column },
+					{ $set: set },
+					{ session }
+				);
+			}
+
+			let tradeColumn = item.column;
+			if (item.tradeConvert) tradeColumn = itemUtil.getById(item.tradeConvert).column;
+			await inventory.updateOne(
+				{ uid: buyerUid, name: tradeColumn },
+				{
+					$inc: { count },
+					$setOnInsert: { uid: buyerUid, name: tradeColumn, daily_count: 0 },
+				},
+				{ upsert: true, session }
+			);
+
+			await transactions.insertOne(
+				{
+					sender: String(user.id),
+					reciever: String(p.msg.author.id),
+					amount: mongoNumeric.integerString(totalPrice),
+					createdAt: new Date(),
+					type: 'item_trade',
+					item: tradeColumn,
+					count,
+				},
+				{ session }
+			);
+			outcome = { ok: true };
+		});
+	} catch (err) {
+		console.error(err);
+		return { ok: false, reason: 'error' };
+	} finally {
+		await session.endSession();
+	}
+	return outcome;
 }

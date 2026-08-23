@@ -35,195 +35,206 @@ module.exports = new CommandInterface({
 	bot: true,
 
 	execute: async function (p) {
-		let global = p.global,
-			con = p.con,
-			msg = p.msg,
-			args = p.args;
-
-		let name = undefined;
+		const global = p.global;
+		const args = p.args;
+		let name;
 		let count = 1;
 		let ranks;
 
-		/* If no args */
 		if (args.length == 0) {
 			p.errorMsg(', Please specify what rank/animal to sacrifice!', 3000);
 			return;
-
-			/* if arg0 is a count */
 		} else if (args.length == 2 && (global.isInt(args[0]) || args[0].toLowerCase() == 'all')) {
-			if (args[0].toLowerCase() != 'all') count = parseInt(args[0]);
-			else count = 'all';
+			count = args[0].toLowerCase() == 'all' ? 'all' : parseInt(args[0]);
 			name = args[1];
-
-			/* if arg1 is a count (or not) */
 		} else if (args.length == 2 && (global.isInt(args[1]) || args[1].toLowerCase() == 'all')) {
-			if (args[1].toLowerCase() != 'all') count = parseInt(args[1]);
-			else count = 'all';
+			count = args[1].toLowerCase() == 'all' ? 'all' : parseInt(args[1]);
 			name = args[0];
-
-			/* Only one argument */
 		} else if (args.length == 1) {
 			if (args[0].toLowerCase() == 'all') ranks = global.getAllRanks();
 			else name = args[0];
-
-			/* Multiple ranks */
 		} else {
 			ranks = {};
-			for (let i = 0; i < args.length; i++) {
-				let tempRank = global.validRank(args[i].toLowerCase());
+			for (const arg of args) {
+				const tempRank = global.validRank(arg.toLowerCase());
 				if (!tempRank) {
 					p.errorMsg(', Invalid arguments!', 3000);
 					return;
 				}
-				if (!(tempRank in ranks)) {
-					ranks[tempRank.rank] = tempRank;
-				}
+				if (!(tempRank.rank in ranks)) ranks[tempRank.rank] = tempRank;
 			}
 		}
 
 		if (name) name = name.toLowerCase();
-
-		let animal, rank;
-		/* If multiple ranks */
+		let animal;
+		let rank;
 		if (ranks) {
-			await sellRanks.bind(p)(Object.values(ranks));
-
-			//if its an animal...
+			await sacrificeRanks.bind(p)(Object.values(ranks));
 		} else if ((animal = global.validAnimal(name))) {
-			if (args.length < 3) await sellAnimal(p, msg, con, animal, count, p.send, global);
-			else
+			if (args.length < 3) await sacrificeAnimal(p, animal, count);
+			else {
 				p.errorMsg(
 					', The correct syntax for sacrificing ranks is `owo sacrifice {animal} {count}`!',
 					3000
 				);
-
-			//if rank...
+			}
 		} else if ((rank = global.validRank(name))) {
-			if (args.length != 1)
+			if (args.length != 1) {
 				p.errorMsg(', The correct syntax for sacrificing ranks is `owo sacrifice {rank}`!', 3000);
-			else await sellRanks.bind(p)([rank]);
-
-			//if neither...
+			} else await sacrificeRanks.bind(p)([rank]);
 		} else {
 			p.errorMsg(', I could not find that animal or rank!', 3000);
 		}
 	},
 });
 
-async function sellAnimal(p, msg, con, animal, count, send, global) {
-	let sql = `SELECT * FROM autohunt WHERE id = ${msg.author.id};`;
-	let result = await p.query(sql);
-	if (!result[0])
-		await p.query(`INSERT IGNORE INTO autohunt (id,essence) VALUES (${msg.author.id},0);`);
-
-	if (count != 'all' && count <= 0) {
-		send('**🚫 |** You need to sacrifice more than 1 silly~', 3000);
+async function sacrificeAnimal(p, animal, requestedCount) {
+	if (requestedCount != 'all' && requestedCount <= 0) {
+		p.send('**🚫 |** You need to sacrifice more than 1 silly~', 3000);
 		return;
 	}
 
-	sql =
-		'SELECT count FROM animal WHERE id = ' + msg.author.id + " AND name = '" + animal.value + "';";
-	if (count == 'all') {
-		sql += `UPDATE animal INNER JOIN autohunt ON animal.id = autohunt.id INNER JOIN (SELECT count FROM animal WHERE id = ${msg.author.id} AND name = '${animal.value}') AS sum SET essence = essence + (sum.count*${animal.essence}), autohunt.total = autohunt.total + (sum.count*${animal.essence}), saccount = saccount + animal.count, animal.count = 0 WHERE animal.id = ${msg.author.id} AND name = '${animal.value}' AND animal.count > 0;`;
-	} else {
-		sql += `UPDATE animal INNER JOIN autohunt ON animal.id = autohunt.id SET essence = essence + (${
-			count * animal.essence
-		}), autohunt.total = autohunt.total + (${
-			count * animal.essence
-		}), saccount = saccount + ${count}, count = count - ${count}  WHERE animal.id = ${
-			msg.author.id
-		} AND name = '${animal.value}' AND count >= ${count};`;
-	}
-	result = await p.query(sql);
+	const id = String(p.msg.author.id);
+	const animals = await p.mongo.collection('animal');
+	const huntbots = await p.mongo.collection('autohunt');
+	const session = await p.mongo.startSession();
+	let sacrificed = 0;
 
-	if (count == 'all') {
-		if (!result[0][0] || result[0][0].count <= 0) {
-			send('**🚫 | ' + p.getName() + "**, You don't have enough animals! >:c", 3000);
-		} else {
-			count = result[0][0].count;
-			send(
-				'**🔪 | ' +
-					p.getName() +
-					'** sacrificed **' +
-					global.unicodeAnimal(animal.value) +
-					'x' +
-					count +
-					'** for **' +
-					essence +
-					' ' +
-					global.toFancyNum(count * animal.essence) +
-					'**'
-			);
-			p.logger.incr('essence', count * animal.essence, { type: 'sacrifice' }, p.msg);
-		}
-	} else if (result[1] && result[1].affectedRows > 0) {
-		send(
-			'**🔪 | ' +
-				p.getName() +
-				'** sacrificed **' +
-				global.unicodeAnimal(animal.value) +
-				'x' +
-				count +
-				'** for **' +
-				essence +
-				' ' +
-				global.toFancyNum(count * animal.essence) +
-				'**'
-		);
-		p.logger.incr('essence', count * animal.essence, { type: 'sacrifice' }, p.msg);
-	} else {
-		send('**🚫 | ' + p.getName() + "**, You can't sacrifice more than you have silly! >:c", 3000);
-	}
-}
-
-async function sellRanks(ranks) {
-	const rankNames = `'` + ranks.map((rank) => rank.rank).join(`','`) + `'`;
-	let total = 0;
-	let sold = '';
-	const con = await this.startTransaction();
 	try {
-		let sql = `SELECT rank, count FROM animal INNER JOIN animals ON animal.name = animals.name WHERE id = ${this.msg.author.id} AND rank in (${rankNames}) AND count > 0;`;
-		let result = await con.query(sql);
-		const rows = result.length;
-		const combine = {};
-		result.forEach((rank) => {
-			if (!combine[rank.rank]) {
-				combine[rank.rank] = 0;
-			}
-			combine[rank.rank] += rank.count;
+		await session.withTransaction(async () => {
+			sacrificed = 0;
+			const row = await animals.findOne({ id, name: animal.value }, { session });
+			const owned = Number(row?.count || 0);
+			const count = requestedCount === 'all' ? owned : requestedCount;
+			if (!row || !count || owned < count) return;
+
+			const changed = await animals.updateOne(
+				{ _id: row._id, count: { $gte: count } },
+				{ $inc: { count: -count, saccount: count } },
+				{ session }
+			);
+			if (!changed.modifiedCount) return;
+
+			const gain = count * animal.essence;
+			await huntbots.updateOne(
+				{ id },
+				{
+					$inc: { essence: gain, total: gain },
+					$setOnInsert: {
+						id,
+						efficiency: 0,
+						duration: 0,
+						cost: 0,
+						gain: 0,
+						exp: 0,
+						radar: 0,
+					},
+				},
+				{ upsert: true, session }
+			);
+			sacrificed = count;
 		});
-
-		for (let rankName in combine) {
-			const rank = ranks.find((rank) => rank.rank === rankName);
-			total += combine[rankName] * rank.essence;
-			sold += rank.emoji + 'x' + combine[rankName] + ' ';
-		}
-		if (!total) {
-			this.errorMsg(", You don't have enough animals! >:c", 3000);
-			await con.rollback();
-			return;
-		}
-
-		sql = `INSERT INTO autohunt (id, essence, total) VALUES (${this.msg.author.id}, ${total}, ${total}) ON DUPLICATE KEY UPDATE essence = essence + ${total}, total = total + ${total};`;
-		sql += `UPDATE animal INNER JOIN animals ON animal.name = animals.name SET saccount = saccount + count, count = 0 WHERE id = ${this.msg.author.id} AND rank IN (${rankNames}) AND count > 0;`;
-		result = await con.query(sql);
-		if (result[1].changedRows != rows) {
-			this.errorMsg(', failed to sacrifice rank.', 3000);
-			await con.rollback();
-			return;
-		}
-
-		await con.commit();
 	} catch (err) {
 		console.error(err);
-		con.rollback();
-		this.errorMsg(', failed to sacrifice rank.', 3000);
+		p.errorMsg(', failed to sacrifice animal.', 3000);
+		return;
+	} finally {
+		await session.endSession();
+	}
+
+	if (!sacrificed) {
+		p.send(
+			requestedCount === 'all'
+				? `**🚫 | ${p.getName()}**, You don't have enough animals! >:c`
+				: `**🚫 | ${p.getName()}**, You can't sacrifice more than you have silly! >:c`,
+			3000
+		);
 		return;
 	}
 
-	sold = sold.slice(0, -1);
+	const gain = sacrificed * animal.essence;
+	p.send(
+		`**🔪 | ${p.getName()}** sacrificed **${p.global.unicodeAnimal(animal.value)}x${sacrificed}** for **${essence} ${p.global.toFancyNum(
+			gain
+		)}**`
+	);
+	p.logger.incr('essence', gain, { type: 'sacrifice' }, p.msg);
+}
+
+async function sacrificeRanks(ranks) {
+	const rankMap = new Map(ranks.map((rank) => [rank.rank, rank]));
+	const id = String(this.msg.author.id);
+	const animals = await this.mongo.collection('animal');
+	const huntbots = await this.mongo.collection('autohunt');
+	const session = await this.mongo.startSession();
+	let total = 0;
+	let sold = '';
+
+	try {
+		await session.withTransaction(async () => {
+			total = 0;
+			sold = '';
+			const rows = await animals.find({ id, count: { $gt: 0 } }, { session }).toArray();
+			const selected = rows.filter((row) => {
+				const info = this.global.validAnimal(row.name);
+				return info && rankMap.has(info.rank);
+			});
+			if (!selected.length) return;
+
+			const combined = {};
+			for (const row of selected) {
+				const info = this.global.validAnimal(row.name);
+				const rank = rankMap.get(info.rank);
+				const count = Number(row.count || 0);
+				const gain = count * rank.essence;
+				total += gain;
+				combined[info.rank] = (combined[info.rank] || 0) + count;
+				const changed = await animals.updateOne(
+					{ _id: row._id, count: row.count },
+					{ $set: { count: 0 }, $inc: { saccount: count } },
+					{ session }
+				);
+				if (!changed.modifiedCount) throw new Error('Animal inventory changed during sacrifice');
+			}
+			if (!total) return;
+
+			await huntbots.updateOne(
+				{ id },
+				{
+					$inc: { essence: total, total },
+					$setOnInsert: {
+						id,
+						efficiency: 0,
+						duration: 0,
+						cost: 0,
+						gain: 0,
+						exp: 0,
+						radar: 0,
+					},
+				},
+				{ upsert: true, session }
+			);
+
+			for (const rankName in combined) {
+				const rank = rankMap.get(rankName);
+				sold += `${rank.emoji}x${combined[rankName]} `;
+			}
+		});
+	} catch (err) {
+		console.error(err);
+		this.errorMsg(', failed to sacrifice rank.', 3000);
+		return;
+	} finally {
+		await session.endSession();
+	}
+
+	if (!total) {
+		this.errorMsg(", You don't have enough animals! >:c", 3000);
+		return;
+	}
+
 	this.send(
-		`**🔪 | ${this.getName()}** sacrificed **${sold}** for a total of **${
+		`**🔪 | ${this.getName()}** sacrificed **${sold.trim()}** for a total of **${
 			this.config.emoji.essence
 		} ${this.global.toFancyNum(total)}**`
 	);

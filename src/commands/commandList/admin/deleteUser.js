@@ -14,59 +14,131 @@ module.exports = new CommandInterface({
 
 	execute: async function (p) {
 		const id = p.args[0];
-		const user = p.fetch.getUser(id);
+		const user = id ? await p.fetch.getUser(id) : null;
 		if (!user || !id) {
 			p.errorMsg(', could not find user');
 			return;
 		}
-		const uid = await p.global.getUid(id);
-		if (!uid) {
+
+		const users = await p.mongo.collection('user');
+		const storedUser = await users.findOne({ id: String(id) }, { projection: { uid: 1 } });
+		if (!storedUser?.uid) {
 			p.errorMsg(', could not find user');
 			return;
 		}
+		const uid = storedUser.uid;
+		const discordId = String(id);
 
-		const sql = `
-			DELETE pta FROM pet_team_animal pta INNER JOIN animal a ON pta.pid = a.pid WHERE a.id = ${id};
-			DELETE FROM animal WHERE id = ${id};
-			DELETE FROM transaction WHERE sender = ${id};
-			DELETE FROM cowoncy WHERE id = ${id};
-			DELETE FROM animal_count WHERE id = ${id};
-			DELETE FROM autohunt WHERE id = ${id};
-			DELETE FROM blackjack WHERE id = ${id};
-			DELETE FROM cowoncy WHERE id = ${id};
-			DELETE FROM lootbox WHERE id = ${id};
-			DELETE FROM lottery WHERE id = ${id};
-			DELETE FROM luck WHERE id = ${id};
-			DELETE FROM rep WHERE id = ${id};
-			DELETE FROM vote WHERE id = ${id};
-			DELETE FROM user_pray WHERE sender = ${id};
-			DELETE FROM user_pray WHERE receiver= ${id};
-			DELETE FROM battle_settings WHERE uid = ${uid};
-			DELETE FROM crate WHERE uid = ${uid};
-			DELETE FROM emoji_steal WHERE uid = ${uid};
-			DELETE FROM pet_team_active WHERE uid = ${uid};
-			DELETE FROM pet_team WHERE uid = ${uid};
-			DELETE FROM quest WHERE uid = ${uid};
-			DELETE FROM rules WHERE uid = ${uid};
-			DELETE FROM shards WHERE uid = ${uid};
-			DELETE FROM user_announcement WHERE uid = ${uid};
-			DELETE FROM user_backgrounds WHERE uid = ${uid};
-			DELETE FROM user_battle WHERE user1 = ${uid};
-			DELETE FROM user_battle WHERE user2 = ${uid};
-			DELETE FROM user_gem WHERE uid = ${uid};
-			DELETE FROM user_level_rewards WHERE uid = ${uid};
-			DELETE FROM user_profile WHERE uid = ${uid};
-			DELETE FROM user_ring WHERE uid = ${uid};
-			DELETE FROM user_survey WHERE uid = ${uid};
-			DELETE FROM timers WHERE uid = ${uid};
-			DELETE FROM user WHERE id = ${uid};
-		`;
-		const result = await p.query(sql);
-		console.log(result);
+		const animals = await p.mongo.collection('animal');
+		const teams = await p.mongo.collection('pet_team');
+		const ownedWeapons = await p.mongo.collection('user_weapon');
+		const animalRows = await animals.find({ id: discordId }, { projection: { pid: 1 } }).toArray();
+		const teamRows = await teams.find({ uid }, { projection: { pgid: 1 } }).toArray();
+		const weaponRows = await ownedWeapons.find({ uid }, { projection: { uwid: 1 } }).toArray();
+		const pids = animalRows.map((row) => row.pid).filter((pid) => pid != null);
+		const pgids = teamRows.map((row) => row.pgid).filter((pgid) => pgid != null);
+		const uwids = weaponRows.map((row) => row.uwid).filter((uwid) => uwid != null);
 
-		console.log(await p.redis.del(id));
-		console.log(await p.redis.del('xplimit_' + id));
-		console.log(await p.redis.del('data_' + id));
-		console.log(await p.redis.zrem('user_xp', id));
+		const session = await p.mongo.startSession();
+		try {
+			session.startTransaction();
+
+			const teamAnimals = await p.mongo.collection('pet_team_animal');
+			const teamAnimalFilters = [];
+			if (pids.length) teamAnimalFilters.push({ pid: { $in: pids } });
+			if (pgids.length) teamAnimalFilters.push({ pgid: { $in: pgids } });
+			if (teamAnimalFilters.length) {
+				await teamAnimals.deleteMany({ $or: teamAnimalFilters }, { session });
+			}
+
+			if (uwids.length) {
+				const weaponPassives = await p.mongo.collection('user_weapon_passive');
+				await weaponPassives.deleteMany({ uwid: { $in: uwids } }, { session });
+			}
+
+			const discordIdCollections = [
+				'animal',
+				'cowoncy',
+				'animal_count',
+				'autohunt',
+				'blackjack',
+				'lootbox',
+				'lottery',
+				'luck',
+				'rep',
+				'vote',
+				'timeout',
+				'user_ban',
+			];
+			for (const name of discordIdCollections) {
+				const collection = await p.mongo.collection(name);
+				await collection.deleteMany({ id: discordId }, { session });
+			}
+
+			const transactions = await p.mongo.collection('transaction');
+			await transactions.deleteMany(
+				{ $or: [{ sender: discordId }, { reciever: discordId }] },
+				{ session }
+			);
+
+			const pray = await p.mongo.collection('user_pray');
+			await pray.deleteMany(
+				{ $or: [{ sender: discordId }, { receiver: discordId }] },
+				{ session }
+			);
+
+			const proposals = await p.mongo.collection('propose');
+			await proposals.deleteMany(
+				{ $or: [{ sender: discordId }, { receiver: discordId }] },
+				{ session }
+			);
+
+			const uidCollections = [
+				'battle_settings',
+				'crate',
+				'emoji_steal',
+				'pet_team_active',
+				'pet_team',
+				'quest',
+				'rules',
+				'shards',
+				'user_announcement',
+				'user_backgrounds',
+				'user_gem',
+				'user_level_rewards',
+				'user_profile',
+				'user_ring',
+				'user_survey',
+				'user_item',
+				'user_weapon',
+				'timers',
+			];
+			for (const name of uidCollections) {
+				const collection = await p.mongo.collection(name);
+				await collection.deleteMany({ uid }, { session });
+			}
+
+			const marriages = await p.mongo.collection('marriage');
+			await marriages.deleteMany({ $or: [{ uid1: uid }, { uid2: uid }] }, { session });
+
+			const userBattles = await p.mongo.collection('user_battle');
+			await userBattles.deleteMany({ $or: [{ user1: uid }, { user2: uid }] }, { session });
+
+			await users.deleteOne({ id: discordId }, { session });
+			await session.commitTransaction();
+		} catch (err) {
+			if (session.inTransaction()) await session.abortTransaction();
+			console.error(err);
+			p.errorMsg(', failed to delete user data');
+			return;
+		} finally {
+			await session.endSession();
+		}
+
+		console.log(await p.redis.del(discordId));
+		console.log(await p.redis.del('xplimit_' + discordId));
+		console.log(await p.redis.del('data_' + discordId));
+		console.log(await p.redis.zrem('user_xp', discordId));
+		p.send(`Deleted persisted data for **${p.getUniqueName(user)}**.`);
 	},
 });

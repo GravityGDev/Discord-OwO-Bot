@@ -8,25 +8,31 @@
 const Base = require('eris-sharder').Base;
 const EventHandler = require('./eventHandlers/EventHandler.js');
 
-// Discordbots.org api
+// Discordbots.org API is optional for local/debug deployments.
 const DBL = require('dblapi.js');
-const dbl = new DBL(process.env.DBL_TOKEN);
+const dbl = process.env.DBL_TOKEN ? new DBL(process.env.DBL_TOKEN) : null;
 
 class OwO extends Base {
 	constructor(bot) {
 		super(bot);
 		this.dbl = dbl;
+		this.shuttingDown = false;
 
-		// Mysql connection
-		this.mysql = require('./utils/mysql.js');
+		// MongoDB is the runtime persistence layer for bot state.
+		this.mongo = require('./utils/mongo.js');
+		this.mongoReady = this.mongo.connect();
+		this.mongoReady.catch((err) => {
+			console.error('[MongoDB] Initial connection failed');
+			console.error(err);
+		});
 
-		// Redis connection
+		// MongoDB-backed compatibility cache (keeps the previous Redis API shape).
 		this.redis = require('./utils/redis.js');
 
 		// Neo4j Logging
 		this.neo4j = require('./utils/neo4j.js');
 
-		// Redis pubsub to communicate with all the other shards/processes
+		// MongoDB pubsub to communicate with all the other shards/processes.
 		this.pubsub = new (require('./utils/pubsub.js'))(this);
 
 		// Handles discord interaction events
@@ -47,7 +53,6 @@ class OwO extends Base {
 		this.debug = this.config.debug;
 		this.prefix = this.config.prefix;
 		this.optOut = {};
-		this.setOptOut();
 
 		// Ban check
 		this.ban = require('./utils/ban.js');
@@ -58,10 +63,6 @@ class OwO extends Base {
 		// Quest Handler
 		this.questHandler = new (require('./botHandlers/questHandler.js'))();
 
-		// Mysql Query Handler
-		this.mysqlhandler = require('./botHandlers/mysqlHandler.js');
-		this.query = this.mysqlhandler.query;
-
 		this.cache = require('./utils/cacheUtil.js');
 
 		// Global helper methods
@@ -69,7 +70,11 @@ class OwO extends Base {
 		this.global.init(this);
 
 		this.animalUtil = require('./utils/animalInfoUtil.js');
-		this.animalUtil.setBot(this);
+		this.animalReady = this.animalUtil.setBot(this);
+		this.animalReady.catch((err) => {
+			console.error('[Startup] Failed to initialize animal catalog');
+			console.error(err);
+		});
 
 		this.rewardUtil = require('./utils/rewardUtil.js');
 
@@ -83,24 +88,18 @@ class OwO extends Base {
 		// Date utility
 		this.dateUtil = require('./utils/dateUtil.js');
 
-		// Hidden macro detection file
-		try {
-			this.macro = require('./../../tokens/macro.js');
-		} catch (err) {
-			console.error('Could not find macro.js, attempting to use ./secret file...');
-			this.macro = require('../secret/macro.js');
-			console.log('Found macro.js file in secret folder!');
-		}
+		// Optional private anti-macro implementation with a bundled self-host fallback.
+		this.macro = require('./utils/macroLoader.js');
 		this.macro.bind(this, require('merge-images'), require('canvas'));
 		this.cooldown.setMacro(this.macro);
 
-		// Allows me to check catch before any fetch requests (reduces api calls)
+		// Allows me to check cache before any fetch requests (reduces api calls)
 		this.fetch = new (require('./utils/fetch.js'))(this);
 
 		// Creates a reaction collector for a message (works for uncached messages too)
 		this.reactionCollector = new (require('./utils/reactionCollector.js'))(this);
 
-		// Creates a reaction collector for a message (works for uncached messages too)
+		// Creates an interaction collector for a message
 		this.interactionCollector = new (require('./utils/interactionCollector.js'))(this);
 
 		// Fetches images and converts them to buffers
@@ -124,27 +123,67 @@ class OwO extends Base {
 		}
 
 		this.giveaway = require('./utils/giveaway.js');
-		this.giveaway.checkGiveawayTimeout(this);
 
 		// Create commands
 		this.command = new (require('./commands/command.js'))(this);
 	}
 
-	launch() {
-		// Bind bot events
+	async launch() {
+		try {
+			// eris-sharder loads this app after Discord is ready. Do not bind command/event
+			// handlers until every Mongo-backed startup dependency is ready as well.
+			await Promise.all([this.mongoReady, this.pubsub.ready, this.animalReady]);
+			await this.setOptOut();
+			await this.giveaway.checkGiveawayTimeout(this);
+		} catch (err) {
+			console.error('[Startup] MongoDB-backed runtime initialization failed');
+			console.error(err);
+			try {
+				await this.pubsub.close();
+				await this.mongo.close();
+			} catch (closeErr) {
+				console.error('[Startup] Failed while closing MongoDB resources');
+				console.error(closeErr);
+			}
+			process.exit(1);
+			return;
+		}
+
+		this.installShutdownHandlers();
+
+		// Bind bot events only after MongoDB-backed state is ready.
 		this.eventHandler = new EventHandler(this);
 
 		// sends info to our main server every X seconds
 		this.InfoUpdater = new (require('./utils/InfoUpdater.js'))(this);
 
 		this.logger.logstashQos('launch');
+		console.log('[Startup] MongoDB runtime ready; event handlers enabled');
+	}
+
+	installShutdownHandlers() {
+		const shutdown = async (signal) => {
+			if (this.shuttingDown) return;
+			this.shuttingDown = true;
+			console.log(`[Shutdown] Received ${signal}; closing MongoDB resources`);
+			try {
+				await this.pubsub.close();
+				await this.mongo.close();
+			} catch (err) {
+				console.error('[Shutdown] Failed to close MongoDB resources cleanly');
+				console.error(err);
+			} finally {
+				process.exit(0);
+			}
+		};
+
+		process.once('SIGTERM', () => shutdown('SIGTERM'));
+		process.once('SIGINT', () => shutdown('SIGINT'));
 	}
 
 	async setOptOut() {
 		const ids = await this.redis.hgetall('optOut');
-		for (let id in ids) {
-			this.optOut[id] = true;
-		}
+		for (let id in ids) this.optOut[id] = true;
 	}
 }
 

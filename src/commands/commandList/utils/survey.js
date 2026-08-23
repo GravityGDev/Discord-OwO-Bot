@@ -68,43 +68,18 @@ module.exports = new CommandInterface({
 });
 
 async function getSurvey(uid) {
-	const con = await this.startTransaction();
-	let userSurvey, survey;
-	try {
-		let sql = `SELECT * FROM user_survey WHERE uid = ${uid};`;
-		sql +=
-			'SELECT * FROM survey_question WHERE sid = (SELECT sid FROM survey ORDER BY sid DESC LIMIT 1);';
-		const result = await con.query(sql);
+	const surveys = await this.mongo.collection('survey');
+	const questions = await this.mongo.collection('survey_question');
+	const userSurveys = await this.mongo.collection('user_survey');
+	const latest = await surveys.findOne({}, { sort: { sid: -1 } });
+	if (!latest) return;
 
-		userSurvey = result[0][0];
-		survey = result[1];
+	const survey = await questions.find({ sid: latest.sid }).sort({ number: 1 }).toArray();
+	if (!survey.length) return;
 
-		await con.commit();
-	} catch (err) {
-		console.error(err);
-		con.rollback();
-		return;
-	}
-
-	// Survey does not exist
-	if (!survey[0]) {
-		return;
-	}
-
-	// User's first time survey
-	if (!userSurvey) {
-		return { newSurvey: survey };
-	}
-
-	// User in a survey
-	if (userSurvey.in_progress) {
-		return { inProgress: true };
-	}
-
-	// User finished latest survey
-	if (userSurvey.sid == survey[0].sid && userSurvey.is_done) {
-		return;
-	}
-
+	const userSurvey = await userSurveys.findOne({ uid });
+	if (!userSurvey) return { newSurvey: survey };
+	if (userSurvey.in_progress) return { inProgress: true };
+	if (userSurvey.sid == latest.sid && userSurvey.is_done) return;
 	return { newSurvey: survey };
 }

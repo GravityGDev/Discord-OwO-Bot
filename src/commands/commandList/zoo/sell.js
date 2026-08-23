@@ -6,7 +6,7 @@
  */
 
 const CommandInterface = require('../../CommandInterface.js');
-
+const mongoNumeric = require('../../../utils/mongoNumeric.js');
 const weaponUtil = require('../battle/util/weaponUtil.js');
 const ringUtil = require('../social/util/ringUtil.js');
 
@@ -38,221 +38,199 @@ module.exports = new CommandInterface({
 	bot: true,
 
 	execute: async function (p) {
-		let global = p.global,
-			con = p.con,
-			msg = p.msg,
-			args = p.args;
-
-		let name = undefined;
+		const global = p.global;
+		const args = p.args;
+		let name;
 		let count = 1;
 		let ranks;
 
-		/* If no args */
 		if (args.length == 0) {
 			p.send('**🚫 | ' + p.getName() + '**, Please specify what rank/animal to sell!', 3000);
 			return;
-
-			/* if arg0 is a count */
 		} else if (args.length == 2 && (global.isInt(args[0]) || args[0].toLowerCase() == 'all')) {
-			if (args[0].toLowerCase() != 'all') count = parseInt(args[0]);
-			else count = 'all';
+			count = args[0].toLowerCase() == 'all' ? 'all' : parseInt(args[0]);
 			name = args[1];
-
-			/* if arg1 is a count (or not) */
 		} else if (args.length == 2 && (global.isInt(args[1]) || args[1].toLowerCase() == 'all')) {
-			if (args[1].toLowerCase() != 'all') count = parseInt(args[1]);
-			else count = 'all';
+			count = args[1].toLowerCase() == 'all' ? 'all' : parseInt(args[1]);
 			name = args[0];
-
-			/* Only one argument */
 		} else if (args.length == 1) {
 			if (args[0].toLowerCase() == 'all') ranks = global.getAllRanks();
 			else name = args[0];
-
-			/* Multiple ranks */
 		} else {
 			ranks = {};
-			for (let i = 0; i < args.length; i++) {
-				let tempRank = global.validRank(args[i].toLowerCase());
+			for (const arg of args) {
+				const tempRank = global.validRank(arg.toLowerCase());
 				if (!tempRank) {
 					p.send('**🚫 | ' + p.getName() + '**, Invalid arguments!', 3000);
 					return;
 				}
-				if (!(tempRank in ranks)) {
-					ranks[tempRank.rank] = tempRank;
-				}
+				if (!(tempRank.rank in ranks)) ranks[tempRank.rank] = tempRank;
 			}
 		}
 
 		if (name) name = name.toLowerCase();
-
-		let animal, rank;
-		/* If multiple ranks */
+		let animal;
+		let rank;
 		if (ranks) {
 			await sellRanks.bind(p)(Object.values(ranks));
-
-			//if its an animal...
 		} else if ((animal = global.validAnimal(name))) {
-			if (args.length < 3) sellAnimal(msg, con, animal, count, p.send, global, p);
-			else
+			if (args.length < 3) await sellAnimal(p, animal, count);
+			else {
 				p.send(
-					'**🚫 | ' +
-						p.getName() +
-						'**, The correct syntax for selling ranks is `owo sell {animal} {count}`!',
+					`**🚫 | ${p.getName()}**, The correct syntax for selling ranks is \`owo sell {animal} {count}\`!`,
 					3000
 				);
-
-			//if rank...
+			}
 		} else if ((rank = global.validRank(name))) {
-			if (args.length != 1)
+			if (args.length != 1) {
 				p.send(
-					'**🚫 | ' +
-						p.getName() +
-						'**, The correct syntax for selling ranks is `owo sell {rank}`!',
+					`**🚫 | ${p.getName()}**, The correct syntax for selling ranks is \`owo sell {rank}\`!`,
 					3000
 				);
-			else await sellRanks.bind(p)([rank]);
-
-			//if a weapon or a ring...
+			} else await sellRanks.bind(p)([rank]);
 		} else if (args.length == 1) {
-			if (global.isInt(name) && parseInt(name) > 0 && parseInt(name) <= ringUtil.getMaxID())
-				ringUtil.sell(p, parseInt(args[0]));
-			else weaponUtil.sell(p, args[0]);
-
-			//if neither...
+			if (global.isInt(name) && parseInt(name) > 0 && parseInt(name) <= ringUtil.getMaxID()) {
+				await ringUtil.sell(p, parseInt(args[0]));
+			} else {
+				await weaponUtil.sell(p, args[0]);
+			}
 		} else {
 			p.send('**🚫 |** I could not find that animal or rank!', 3000);
 		}
 	},
 });
 
-function sellAnimal(msg, con, animal, count, send, global, p) {
-	if (count != 'all' && count <= 0) {
-		send('**🚫 |** You need to sell more than 1 silly~', 3000);
+async function sellAnimal(p, animal, requestedCount) {
+	if (requestedCount != 'all' && requestedCount <= 0) {
+		p.send('**🚫 |** You need to sell more than 1 silly~', 3000);
 		return;
 	}
-	let sql =
-		'UPDATE cowoncy NATURAL JOIN animal SET money = money + ' +
-		count * animal.price +
-		', count = count - ' +
-		count +
-		', sellcount = sellcount + ' +
-		count +
-		' WHERE id = ' +
-		msg.author.id +
-		" AND name = '" +
-		animal.value +
-		"' AND count >= " +
-		count +
-		';';
-	if (count == 'all') {
-		sql =
-			'SELECT count FROM animal WHERE id = ' +
-			msg.author.id +
-			" AND name = '" +
-			animal.value +
-			"';";
-		sql +=
-			'UPDATE cowoncy NATURAL JOIN animal SET money = money + (count*' +
-			animal.price +
-			'), sellcount = sellcount + count, count = 0 WHERE id = ' +
-			msg.author.id +
-			" AND name = '" +
-			animal.value +
-			"' AND count >= 1;";
-	}
-	con.query(sql, function (err, result) {
-		if (err) {
-			console.error(err);
-			return;
-		}
-		if (count == 'all') {
-			if (result[1].affectedRows <= 0) {
-				send('**🚫 | ' + p.getName() + "**, You don't have enough animals! >:c", 3000);
-			} else {
-				count = result[0][0].count;
-				send(
-					'**🔪 | ' +
-						p.getName() +
-						'** sold **' +
-						global.unicodeAnimal(animal.value) +
-						'x' +
-						count +
-						'** for a total of **<:cowoncy:416043450337853441> ' +
-						global.toFancyNum(count * animal.price) +
-						'**'
-				);
-				p.logger.incr('cowoncy', count * animal.price, { type: 'sell' }, p.msg);
-				// TODO neo4j
-			}
-		} else if (result.affectedRows > 0) {
-			send(
-				'**🔪 | ' +
-					p.getName() +
-					'** sold **' +
-					global.unicodeAnimal(animal.value) +
-					'x' +
-					count +
-					'** for a total of **<:cowoncy:416043450337853441> ' +
-					global.toFancyNum(count * animal.price) +
-					'**'
+
+	const animals = await p.mongo.collection('animal');
+	const cowoncy = await p.mongo.collection('cowoncy');
+	const id = String(p.msg.author.id);
+	const session = await p.mongo.startSession();
+	let soldCount = 0;
+
+	try {
+		await session.withTransaction(async () => {
+			soldCount = 0;
+			const row = await animals.findOne({ id, name: animal.value }, { session });
+			const owned = Number(row?.count || 0);
+			const count = requestedCount === 'all' ? owned : requestedCount;
+			if (!row || !count || owned < count) return;
+
+			const changed = await animals.updateOne(
+				{ _id: row._id, count: { $gte: count } },
+				{ $inc: { count: -count, sellcount: count } },
+				{ session }
 			);
-			p.logger.incr('cowoncy', count * animal.price, { type: 'sell' }, p.msg);
-			// TODO neo4j
-		} else {
-			send('**🚫 | ' + p.getName() + "**, You can't sell more than you have silly! >:c", 3000);
-		}
-	});
+			if (!changed.modifiedCount) return;
+
+			await mongoNumeric.add(
+				cowoncy,
+				{ id },
+				'money',
+				count * animal.price,
+				{ upsert: true, session },
+				{ id }
+			);
+			soldCount = count;
+		});
+	} catch (err) {
+		console.error(err);
+		p.errorMsg(', failed to sell animal.', 3000);
+		return;
+	} finally {
+		await session.endSession();
+	}
+
+	if (!soldCount) {
+		p.send(
+			requestedCount === 'all'
+				? `**🚫 | ${p.getName()}**, You don't have enough animals! >:c`
+				: `**🚫 | ${p.getName()}**, You can't sell more than you have silly! >:c`,
+			3000
+		);
+		return;
+	}
+
+	const total = soldCount * animal.price;
+	p.send(
+		`**🔪 | ${p.getName()}** sold **${p.global.unicodeAnimal(animal.value)}x${soldCount}** for a total of **<:cowoncy:416043450337853441> ${p.global.toFancyNum(
+			total
+		)}**`
+	);
+	p.logger.incr('cowoncy', total, { type: 'sell' }, p.msg);
 }
 
 async function sellRanks(ranks) {
-	const rankNames = `'` + ranks.map((rank) => rank.rank).join(`','`) + `'`;
+	const rankMap = new Map(ranks.map((rank) => [rank.rank, rank]));
+	const id = String(this.msg.author.id);
+	const animals = await this.mongo.collection('animal');
+	const cowoncy = await this.mongo.collection('cowoncy');
+	const session = await this.mongo.startSession();
 	let total = 0;
 	let sold = '';
-	const con = await this.startTransaction();
+
 	try {
-		let sql = `SELECT rank, count FROM animal INNER JOIN animals ON animal.name = animals.name WHERE id = ${this.msg.author.id} AND rank in (${rankNames}) AND count > 0;`;
-		let result = await con.query(sql);
-		const rows = result.length;
-		const combine = {};
-		result.forEach((rank) => {
-			if (!combine[rank.rank]) {
-				combine[rank.rank] = 0;
+		await session.withTransaction(async () => {
+			total = 0;
+			sold = '';
+			const rows = await animals.find({ id, count: { $gt: 0 } }, { session }).toArray();
+			const selected = rows.filter((row) => {
+				const info = this.global.validAnimal(row.name);
+				return info && rankMap.has(info.rank);
+			});
+			if (!selected.length) return;
+
+			for (const row of selected) {
+				const info = this.global.validAnimal(row.name);
+				const rank = rankMap.get(info.rank);
+				const count = Number(row.count || 0);
+				total += count * rank.price;
+				await animals.updateOne(
+					{ _id: row._id, count: row.count },
+					{ $set: { count: 0 }, $inc: { sellcount: count } },
+					{ session }
+				);
 			}
-			combine[rank.rank] += rank.count;
+
+			if (!total) return;
+			await mongoNumeric.add(
+				cowoncy,
+				{ id },
+				'money',
+				total,
+				{ upsert: true, session },
+				{ id }
+			);
+
+			const combined = {};
+			for (const row of selected) {
+				const info = this.global.validAnimal(row.name);
+				combined[info.rank] = (combined[info.rank] || 0) + Number(row.count || 0);
+			}
+			for (const rankName in combined) {
+				const rank = rankMap.get(rankName);
+				sold += `${rank.emoji}x${combined[rankName]} `;
+			}
 		});
-
-		for (let rankName in combine) {
-			const rank = ranks.find((rank) => rank.rank === rankName);
-			total += combine[rankName] * rank.price;
-			sold += rank.emoji + 'x' + combine[rankName] + ' ';
-		}
-		if (!total) {
-			this.errorMsg(", You don't have enough animals! >:c", 3000);
-			await con.rollback();
-			return;
-		}
-
-		sql = `UPDATE cowoncy SET money = money + ${total} WHERE id = ${this.msg.author.id};`;
-		sql += `UPDATE animal INNER JOIN animals ON animal.name = animals.name SET sellcount = sellcount + count, count = 0 WHERE id = ${this.msg.author.id} AND rank IN (${rankNames}) AND count > 0;`;
-		result = await con.query(sql);
-		if (result[1].changedRows != rows) {
-			this.errorMsg(', failed to sell rank.', 3000);
-			await con.rollback();
-			return;
-		}
-
-		await con.commit();
 	} catch (err) {
 		console.error(err);
-		con.rollback();
 		this.errorMsg(', failed to sell rank.', 3000);
+		return;
+	} finally {
+		await session.endSession();
+	}
+
+	if (!total) {
+		this.errorMsg(", You don't have enough animals! >:c", 3000);
 		return;
 	}
 
-	sold = sold.slice(0, -1);
 	this.send(
-		`**🔪 | ${this.getName()}** sold **${sold}** for a total of **<:cowoncy:416043450337853441> ${this.global.toFancyNum(
+		`**🔪 | ${this.getName()}** sold **${sold.trim()}** for a total of **<:cowoncy:416043450337853441> ${this.global.toFancyNum(
 			total
 		)}**`
 	);

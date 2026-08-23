@@ -23,7 +23,7 @@ for (let i in weaponUtil.shardPrices) {
 	markupPrices[i] = Math.round(weaponUtil.shardPrices[i] * 2.5);
 }
 
-const qualityAvg = 70; // must be greater than 50
+const qualityAvg = 70;
 const maxQuality = 100;
 const minQuality = qualityAvg * 2 - maxQuality;
 
@@ -34,9 +34,7 @@ const getDailyWeapons = (exports.getDailyWeapons = async function (p) {
 	let weaponKeyResults = weaponKeys.map((id) => id + '' + p.msg.author.id);
 	weaponKeyResults = await redis.hmget(redisKey + 'Purchased', weaponKeyResults);
 	let purchased = {};
-	for (let i in weaponKeys) {
-		purchased[weaponKeys[i]] = weaponKeyResults[i];
-	}
+	for (let i in weaponKeys) purchased[weaponKeys[i]] = weaponKeyResults[i];
 
 	for (let i in weapons) {
 		let weaponJson = JSON.parse(weapons[i]);
@@ -66,7 +64,6 @@ exports.resetDailyWeapons = async function () {
 
 	for (let i = 101; i < 101 + weaponCount; i++) {
 		let weapon = weaponUtil.getRandomWeapon();
-
 		let wid = weapon.id;
 		let wear = weapon.wear.id;
 		let hasTT = weapon.hasTakedownTracker;
@@ -94,14 +91,22 @@ exports.resetDailyWeapons = async function () {
 };
 
 exports.buy = async function (p, id) {
-	// Purchase weapon crate
 	if (id === crateId) {
 		if (await useShards(p, cratePrice)) {
 			try {
-				let sql = `INSERT INTO crate(uid,cratetype,boxcount,claimcount,claim) VALUES ((SELECT uid FROM user WHERE id = ${p.msg.author.id}),0,1,0,'2017-01-01') ON DUPLICATE KEY UPDATE boxcount = boxcount + 1;`;
-				await p.query(sql);
+				const uid = await p.global.getUid(p.msg.author.id);
+				const crates = await p.mongo.collection('crate');
+				await crates.updateOne(
+					{ uid, cratetype: 0 },
+					{
+						$inc: { boxcount: 1 },
+						$setOnInsert: { claimcount: 0, claim: new Date('2017-01-01T00:00:00.000Z') },
+					},
+					{ upsert: true }
+				);
 			} catch (err) {
 				console.error(err);
+				await refundShards(p, cratePrice);
 				p.errorMsg('Failed to add a Weapon Crate to your inventory');
 				return;
 			}
@@ -121,14 +126,12 @@ exports.buy = async function (p, id) {
 		return;
 	}
 
-	// Check if purchased already
 	let purchased = await redis.hmget(redisKey + 'Purchased', [id + '' + p.msg.author.id]);
 	if (purchased[0]) {
 		p.errorMsg(', You already purchased this weapon, silly!', 3000);
 		return;
 	}
 
-	// Get weapon
 	let weapons = await redis.hgetall(redisKey);
 	if (!weapons[id]) {
 		p.errorMsg(', what are you trying to buy...?', 3000);
@@ -159,11 +162,10 @@ exports.buy = async function (p, id) {
 	try {
 		await weapon.save(p.msg.author.id);
 		weaponEmojis = '`' + weapon.shortenUWID + '` ' + weapon.emoji;
-		for (let i = 0; i < weapon.passives.length; i++) {
-			weaponEmojis += weapon.passives[i].emoji;
-		}
+		for (let i = 0; i < weapon.passives.length; i++) weaponEmojis += weapon.passives[i].emoji;
 	} catch (err) {
 		console.error(err);
+		await refundShards(p, weapon.shardPrice);
 		p.errorMsg(', I failed to add the weapon to your inventory :(');
 		return;
 	}
@@ -178,14 +180,23 @@ exports.buy = async function (p, id) {
 };
 
 async function useShards(p, count) {
-	/* check if enough shards */
-	let sql = `UPDATE shards INNER JOIN user ON shards.uid = user.uid SET shards.count = shards.count - ${count} WHERE user.id = ${p.msg.author.id} AND shards.count >= ${count};`;
-	let result = await p.query(sql);
-	if (result.changedRows >= 1) {
+	const uid = await p.global.getUid(p.msg.author.id);
+	const shards = await p.mongo.collection('shards');
+	const result = await shards.updateOne(
+		{ uid, count: { $gte: count } },
+		{ $inc: { count: -count } }
+	);
+	if (result.modifiedCount >= 1) {
 		p.logger.decr('shards', -1 * count, { type: 'shop' }, p.msg);
 		return true;
 	}
 	return false;
+}
+
+async function refundShards(p, count) {
+	const uid = await p.global.getUid(p.msg.author.id);
+	const shards = await p.mongo.collection('shards');
+	await shards.updateOne({ uid }, { $inc: { count } }, { upsert: true });
 }
 
 exports.displayShop = async function (p) {
@@ -224,7 +235,6 @@ exports.displayShop = async function (p) {
 
 function createEmbed(p, weapons, page) {
 	let weapon = weapons[page];
-	/* Parse image url */
 	let url = weapon.emoji;
 	let temp;
 	if ((temp = url.match(/:[0-9]+>/))) {
@@ -234,24 +244,19 @@ function createEmbed(p, weapons, page) {
 		url = temp;
 	}
 
-	/* Make description */
 	let desc = `**Name:** ${weapon.name}\n`;
 	desc += `**Shop ID:** ${weapon.shopID}\n`;
 	if (weapon.purchased) desc += '**Price:** PURCHASED\n\n';
 	else desc += `**Price:** ${weapon.shardPrice} ${shardEmoji}\n\n`;
 	desc += `**Quality:** ${weapon.rank.emoji} ${weapon.avgQuality}%\n`;
 	desc += `**Wear:** \`${weapon.wearName?.toUpperCase()}\`\n`;
-	if (weapon.hasTakedownTracker) {
-		desc += `**Takedown Tracker:** \`TRUE\`\n`;
-	}
+	if (weapon.hasTakedownTracker) desc += `**Takedown Tracker:** \`TRUE\`\n`;
 	desc += `**WP Cost:** ${Math.ceil(weapon.manaCost)} <:wp:531620120976687114>`;
 	desc += `\n**Description:** ${weapon.desc}\n`;
 	if (weapon.buffList.length > 0) {
 		desc += '\n';
 		let buffs = weapon.getBuffs();
-		for (let i in buffs) {
-			desc += `${buffs[i].emoji} **${buffs[i].name}** - ${buffs[i].desc}\n`;
-		}
+		for (let i in buffs) desc += `${buffs[i].emoji} **${buffs[i].name}** - ${buffs[i].desc}\n`;
 	}
 	if (weapon.passives.length <= 0) desc += '\n**Passives:** None';
 	for (var i = 0; i < weapon.passives.length; i++) {
@@ -260,17 +265,13 @@ function createEmbed(p, weapons, page) {
 	}
 
 	let timeUntil = dateUtil.afterMidnight();
-
-	/* Construct embed */
 	return {
 		author: {
 			name: "Today's Available Weapons",
 			icon_url: p.msg.author.avatarURL,
 		},
 		color: p.config.embed_color,
-		thumbnail: {
-			url: url,
-		},
+		thumbnail: { url },
 		description: desc,
 		footer: {
 			text:

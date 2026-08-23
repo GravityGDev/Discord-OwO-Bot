@@ -7,12 +7,10 @@
 
 const requireDir = require('require-dir');
 const dir = requireDir('./commandList', { recurse: true });
-
 const CommandInterface = require('./CommandInterface.js');
 
 const commands = {};
 const adminCommands = {};
-
 const aliasToCommand = {};
 const mcommands = {};
 const commandGroups = {};
@@ -27,95 +25,67 @@ class Command {
 	}
 
 	async execute(msg, raw) {
-		// Parse content info
 		let { args, context } = (await checkPrefix(this.main, msg)) || {};
 		const containsPoints =
 			msg.content.toLowerCase().includes('owo') || msg.content.toLowerCase().includes('uwu');
 		if (!args) {
-			//if user said owo/uwu
-			if (containsPoints) {
-				executeCommand(this.main, initParam(msg, 'points', [], this.main));
-			}
+			if (containsPoints) await executeCommand(this.main, initParam(msg, 'points', [], this.main));
 			return;
 		}
-
-		//Get command name
 		let command = args.shift().toLowerCase();
-
-		//  Check if that command exists
 		if (!commands[command]) {
-			if (containsPoints) {
-				executeCommand(this.main, initParam(msg, 'points', [], this.main));
-			}
+			if (containsPoints) await executeCommand(this.main, initParam(msg, 'points', [], this.main));
 			return;
 		}
-
-		// Make sure user accepts rules first
 		if (!(await acceptedRules(this.main, msg))) {
-			executeCommand(this.main, initParam(msg, 'rule', [], this.main));
+			await executeCommand(this.main, initParam(msg, 'rule', [], this.main));
 			return;
 		}
-
-		// Init params to pass into command
 		let param = initParam(msg, command, args, this.main, context);
-
-		// Parse user raw data, so our cache is up to date
 		this.checkRaw(raw);
-
-		// Execute the command
 		await executeCommand(this.main, param);
 	}
 
 	async executeInteraction(interaction) {
-		//Get command name
 		let command = interaction.command.toLowerCase();
-
-		// Make sure user accepts rules first
 		if (!(await acceptedRules(this.main, interaction))) {
-			executeCommand(this.main, initParam(interaction, 'rule', [], this.main));
+			await executeCommand(this.main, initParam(interaction, 'rule', [], this.main));
 			return;
 		}
-
-		// Init params to pass into command
 		let param = initParam(interaction, command, interaction.args, this.main);
-
-		// Execute the command
 		await executeCommand(this.main, param);
 	}
 
 	async executeAdmin(msg) {
-		if (msg.content.toLowerCase().indexOf(this.prefix) !== 0) {
-			return false;
-		}
+		if (msg.content.toLowerCase().indexOf(this.prefix) !== 0) return false;
 		let { args, context } = (await checkPrefix(this.main, msg)) || {};
 		let command = args.shift().toLowerCase();
 		let commandObj = adminCommands[command];
-		if (!commandObj) {
-			return false;
-		}
+		if (!commandObj) return false;
 		let param = initParam(msg, command, args, this.main, context);
 
-		if (commandObj.owner && msg.author.id === this.main.config.owner) {
-			adminCommands[command].execute(param);
+		// The configured self-host owner is the bot superuser and may run every admin command.
+		if (msg.author.id === this.main.config.owner) {
+			await commandObj.execute(param);
 			return true;
 		} else if (this.main.config.modChannels.includes(msg.channel.id)) {
 			if (
 				commandObj.admin &&
 				this.main.config.role.admin.find((id) => msg.member?.roles.includes(id))
 			) {
-				adminCommands[command].execute(param);
+				await commandObj.execute(param);
 				return true;
 			} else if (
 				commandObj.manager &&
 				this.main.config.role.manager.find((id) => msg.member?.roles.includes(id))
 			) {
-				adminCommands[command].execute(param);
+				await commandObj.execute(param);
 				return true;
 			} else if (
 				commandObj.helper &&
 				this.main.config.role.helper.find((id) => msg.member?.roles.includes(id))
 			) {
-				adminCommands[command].execute(param);
+				await commandObj.execute(param);
 				return true;
 			}
 		}
@@ -123,9 +93,7 @@ class Command {
 	}
 
 	checkRaw(raw) {
-		if (raw?.author) {
-			this.updateUser(raw.author);
-		}
+		if (raw?.author) this.updateUser(raw.author);
 		raw?.mentions?.forEach((user) => this.updateUser(user));
 	}
 
@@ -141,9 +109,7 @@ class Command {
 		) {
 			update = true;
 		}
-		if (!user || update) {
-			this.main.bot.users.update(rawUser, this.main.bot);
-		}
+		if (!user || update) this.main.bot.users.update(rawUser, this.main.bot);
 	}
 
 	messageUserInteractionToCommand(interaction) {
@@ -153,25 +119,13 @@ class Command {
 
 async function executeCommand(main, p) {
 	let { ban, cooldown, logger } = main;
-
-	// Check if the command/user/channel is banned
 	if (!(await ban.check(p, p.commandAlias))) return;
-
-	// Check for cooldowns
 	if (!(await cooldown.check(p, p.commandAlias))) return;
-
-	// Execute command
 	await commands[p.command].execute(p);
-
-	// Log stats to statsd
 	logger.command(p.commandAlias, p.msg);
 	logger.logstash(p.commandAlias, p);
 }
 
-/**
- * Reads and initializes the commands
- * Will sort them by type and aliases
- */
 function initCommands() {
 	let groupCommand = function (command, name) {
 		let groups = command.group;
@@ -219,21 +173,15 @@ function initCommands() {
 			six: command.six,
 			group: command.group,
 		};
-
 		command.appCommands?.forEach((appCommand) => {
-			// Message or User commands
-			if (appCommand.type === 3 || appCommand.type === 2) {
-				appCommandNameToCommand[appCommand.name] = name;
-			}
+			if (appCommand.type === 3 || appCommand.type === 2) appCommandNameToCommand[appCommand.name] = name;
 		});
 	};
 
 	let addAdminCommand = function (command) {
 		let alias = command.alias;
 		if (alias) {
-			for (let i = 0; i < alias.length; i++) {
-				adminCommands[alias[i]] = command;
-			}
+			for (let i = 0; i < alias.length; i++) adminCommands[alias[i]] = command;
 		}
 	};
 	for (let key in dir) {
@@ -241,9 +189,7 @@ function initCommands() {
 			addCommand(dir[key]);
 		} else if (Array.isArray(dir[key])) {
 			dir[key].forEach((val) => {
-				if (val instanceof CommandInterface) {
-					addCommand(val);
-				}
+				if (val instanceof CommandInterface) addCommand(val);
 			});
 		} else {
 			for (let key2 in dir[key]) {
@@ -251,9 +197,7 @@ function initCommands() {
 					addCommand(dir[key][key2]);
 				} else if (Array.isArray(dir[key][key2])) {
 					dir[key][key2].forEach((val) => {
-						if (val instanceof CommandInterface) {
-							addCommand(val);
-						}
+						if (val instanceof CommandInterface) addCommand(val);
 					});
 				}
 			}
@@ -261,9 +205,6 @@ function initCommands() {
 	}
 }
 
-/**
- * Initializes the resources/utilities required for each command
- */
 function initParam(msg, command, args, main, context) {
 	let param = {
 		msg: msg,
@@ -275,11 +216,8 @@ function initParam(msg, command, args, main, context) {
 		client: main.bot,
 		animalUtil: main.animalUtil,
 		dbl: main.dbl,
-		mysql: main.mysql,
-		con: main.mysql.con,
-		startTransaction: main.mysqlhandler.startTransaction,
+		mongo: main.mongo,
 		redis: main.redis,
-		query: main.query,
 		send: main.sender.send(msg),
 		replyMsg: main.sender.reply(msg),
 		errorMsg: main.sender.error(main.config.emoji.invalid, msg),
@@ -342,13 +280,11 @@ function initParam(msg, command, args, main, context) {
 		if (!text) return;
 		let userMentions = text.match(/<@!?\d+>/g);
 		let roleMentions = text.match(/<@&\d+>/g);
-
 		for (let i in userMentions) {
 			let mention = userMentions[i];
 			let user = param.getMention(mention);
 			if (user) text = text.replace(mention, '@' + user.username);
 		}
-
 		for (let i in roleMentions) {
 			let mention = roleMentions[i];
 			let role = param.getRole(mention);
@@ -356,24 +292,14 @@ function initParam(msg, command, args, main, context) {
 		}
 		return text;
 	};
-	param.getName = (user) => {
-		return param.global.getName(user || param.msg.member || param.msg.author);
-	};
-	param.getUniqueName = (user) => {
-		return param.global.getUniqueName(user || param.msg.author);
-	};
-	param.getTag = (user) => {
-		return param.global.getTag(user || param.msg.author);
-	};
+	param.getName = (user) => param.global.getName(user || param.msg.member || param.msg.author);
+	param.getUniqueName = (user) => param.global.getUniqueName(user || param.msg.author);
+	param.getTag = (user) => param.global.getTag(user || param.msg.author);
 	param.getFlags = () => {
-		if (param.flags) {
-			return param.flags;
-		}
+		if (param.flags) return param.flags;
 		param.flags = {};
 		args?.forEach((arg) => {
-			if (arg.charAt(0) === '-') {
-				param.flags[arg.substring(1).toLowerCase()] = true;
-			}
+			if (arg.charAt(0) === '-') param.flags[arg.substring(1).toLowerCase()] = true;
 		});
 		return param.flags;
 	};
@@ -387,17 +313,12 @@ async function checkPrefix(main, msg) {
 		let context = getContext(args, main.prefix, msg.content);
 		return { args, context };
 	}
-
 	if (!msg.channel.guild) return {};
-
-	// If prefix isn't saved, fetch it
 	if (msg.channel.guild.prefix === undefined) {
 		let prefix = await main.redis.hget(msg.channel.guild.id, 'prefix');
 		if (prefix) msg.channel.guild.prefix = prefix;
 		else msg.channel.guild.prefix = false;
 	}
-
-	// check with custom prefix
 	if (msg.channel.guild.prefix && content.startsWith(msg.channel.guild.prefix)) {
 		let args = msg.content.slice(msg.channel.guild.prefix.length).trim().split(/ +/g);
 		let context = getContext(args, msg.channel.guild.prefix, msg.content);
@@ -411,9 +332,12 @@ function getContext(args, prefix, content) {
 
 async function acceptedRules(main, msg) {
 	if (!msg.author.acceptedRules) {
-		let sql = `SELECT rules.* FROM rules INNER JOIN user ON user.uid = rules.uid WHERE id = ${msg.author.id};`;
-		let result = await main.mysqlhandler.query(sql);
-		msg.author.acceptedRules = !!result[0];
+		const rules = await main.mongo.collection('rules');
+		const result = await rules.findOne(
+			{ _id: String(msg.author.id), opinion: 1 },
+			{ projection: { _id: 1 } }
+		);
+		msg.author.acceptedRules = !!result;
 	}
 	return msg.author.acceptedRules;
 }

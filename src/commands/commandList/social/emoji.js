@@ -40,12 +40,9 @@ module.exports = new CommandInterface({
 	six: 500,
 
 	execute: async function (p) {
-		// Special case for message interaction
 		if (this.interaction && this.options.message) {
 			const emojis = parseEmojis([this.options.message]);
 			await display(p, emojis);
-
-			/* Look at previous message */
 		} else if (!p.args.length || ['prev', 'previous', 'p'].includes(p.args[0]?.toLowerCase())) {
 			let msgs = await p.global.getChannelMessages(p.msg.channel, 10);
 			if (!msgs) {
@@ -54,18 +51,12 @@ module.exports = new CommandInterface({
 			}
 			const emojis = parseEmojis(msgs);
 			await display(p, emojis);
-
-			// Set emoji steal guild
 		} else if (['setguild', 'setserver', 'set', 'setsteal'].includes(p.args[0].toLowerCase())) {
 			setServer(p);
-
-			// unset emoji steal guild
 		} else if (
 			['unsetguild', 'unsetserver', 'unset', 'unsetsteal'].includes(p.args[0].toLowerCase())
 		) {
 			unsetServer(p);
-
-			/* Look at current message */
 		} else {
 			let text = p.args.join(' ');
 			let emojis = parseIDs(text);
@@ -97,7 +88,6 @@ function parseEmojis(msgs) {
 
 function parseIDs(text) {
 	let emojis = [];
-
 	let parsedEmojis = text.match(/<[as]?:[a-z0-9_ ]+:[0-9]+>/gi);
 
 	for (let i in parsedEmojis) {
@@ -142,9 +132,7 @@ async function display(p, emojis) {
 				url: emoji.url,
 				icon_url: p.msg.author.avatarURL,
 			},
-			description: `**${emoji.isSticker ? 'STICKER' : 'EMOJI'}**: \`${emoji.name}\` \`${
-				emoji.id
-			}\``,
+			description: `**${emoji.isSticker ? 'STICKER' : 'EMOJI'}**: \`${emoji.name}\` \`${emoji.id}\``,
 			color: p.config.embed_color,
 			image: { url: emoji.url },
 			url: emoji.url,
@@ -195,13 +183,11 @@ async function display(p, emojis) {
 }
 
 async function setServer(p) {
-	// Check if the user has emoji permissions
 	if (!p.msg.member.permissions.has('manageEmojis')) {
 		p.errorMsg(', you do not have permissions to edit emojis on this server!', 3000);
 		return;
 	}
 
-	// Check if the bot has permissions
 	if (!p.msg.channel.guild.members.get(p.client.user.id).permissions.has('manageEmojis')) {
 		p.errorMsg(
 			", I don't have permissions to add emojis! Please give me permission or reinvite me!\n" +
@@ -210,21 +196,19 @@ async function setServer(p) {
 		return;
 	}
 
-	let sql = `INSERT INTO emoji_steal (uid,guild) VALUES ((SELECT uid FROM user WHERE id = ${p.msg.author.id}),${p.msg.channel.guild.id}) ON DUPLICATE KEY UPDATE guild = ${p.msg.channel.guild.id};`;
-	try {
-		await p.query(sql);
-	} catch (e) {
-		if (e.code == 'ER_BAD_NULL_ERROR') {
-			sql = `INSERT IGNORE INTO user (id,count) VALUES (${p.msg.author.id},0);` + sql;
-			await p.query(sql);
-		}
-	}
-
+	const uid = await p.global.getUid(p.msg.author.id);
+	const steals = await p.mongo.collection('emoji_steal');
+	await steals.updateOne(
+		{ uid },
+		{ $set: { guild: String(p.msg.channel.guild.id) }, $setOnInsert: { uid } },
+		{ upsert: true }
+	);
 	p.replyMsg(p.config.emoji.steal, ', stolen emojis will now be sent to this server!');
 }
 
 async function unsetServer(p) {
-	let sql = `DELETE FROM emoji_steal WHERE uid = (SELECT uid FROM user WHERE id = ${p.msg.author.id});`;
-	await p.query(sql);
+	const uid = await p.global.getUid(p.msg.author.id);
+	const steals = await p.mongo.collection('emoji_steal');
+	await steals.deleteOne({ uid });
 	p.replyMsg(p.config.emoji.steal, ', your server has been unset for stealing!');
 }

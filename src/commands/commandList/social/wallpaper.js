@@ -10,14 +10,14 @@ const CommandInterface = require('../../CommandInterface.js');
 const offsetID = 200;
 const nextPageEmoji = '➡️';
 const prevPageEmoji = '⬅️';
-const buyEmoji = '🖼️';
+const equipEmoji = '🖼️';
 
 module.exports = new CommandInterface({
 	alias: ['wallpaper', 'wp', 'wallpapers', 'background', 'backgrounds'],
 
 	args: '{id}',
 
-	desc: 'View your current wallpapers! Equipped them by clicking the wallpaper emoji.\nYou can buy more wallpapers from the shop.',
+	desc: 'View your current wallpapers! Equip them by clicking the wallpaper emoji.\nYou can buy more wallpapers from the shop.',
 
 	example: ['owo wallpaper', 'owo wallpaper 201'],
 
@@ -30,64 +30,114 @@ module.exports = new CommandInterface({
 	cooldown: 15000,
 
 	execute: async function (p) {
-		let totalPages = await getTotalPages(p);
-		let currentPage = 1;
-		let page = await createPage(p, currentPage, totalPages);
-		let msg = await p.send(page);
+		try {
+			const totalPages = await getTotalPages(p);
+			let currentPage = await getStartPage(p, totalPages);
+			if (currentPage === null) return;
 
-		if (totalPages <= 0) return;
+			let page = await createPage(p, currentPage, totalPages);
+			const msg = await p.send({ embed: page.embed });
 
-		let filter = (emoji, userID) =>
-			(emoji.name === buyEmoji || emoji.name === nextPageEmoji || emoji.name === prevPageEmoji) &&
-			userID == p.msg.author.id;
-		let collector = p.reactionCollector.create(msg, filter, {
-			time: 900000,
-			idle: 120000,
-		});
+			if (totalPages <= 0) return;
 
-		await msg.addReaction(prevPageEmoji);
-		await msg.addReaction(nextPageEmoji);
-		await msg.addReaction(buyEmoji);
-
-		collector.on('collect', async function (emoji) {
-			if (emoji.name === nextPageEmoji) {
-				if (currentPage < totalPages) currentPage++;
-				else currentPage = 1;
-				page = await createPage(p, currentPage, totalPages);
-				await msg.edit(page);
-			} else if (emoji.name === prevPageEmoji) {
-				if (currentPage > 1) currentPage--;
-				else currentPage = totalPages;
-				page = await createPage(p, currentPage, totalPages);
-				await msg.edit(page);
-			} else if (emoji.name == buyEmoji) {
-				if (page.embed.bid) {
-					let sql = `INSERT INTO user_profile (uid,bid) VALUES ((SELECT uid FROM user WHERE id = ${p.msg.author.id}),${page.embed.bid}) ON DUPLICATE KEY UPDATE bid = ${page.embed.bid};`;
-					await p.query(sql);
-					page = await createPage(p, currentPage, totalPages);
-					await msg.edit(page);
-				}
-			}
-		});
-
-		collector.on('end', async function (_collected) {
-			page = await createPage(p, currentPage, totalPages);
-			page.embed.color = 6381923;
-			await msg.edit({
-				content: 'This message is now inactive',
-				embed: page.embed,
+			const filter = (emoji, userID) =>
+				(emoji.name === equipEmoji ||
+					emoji.name === nextPageEmoji ||
+					emoji.name === prevPageEmoji) &&
+				userID == p.msg.author.id;
+			const collector = p.reactionCollector.create(msg, filter, {
+				time: 900000,
+				idle: 120000,
 			});
-		});
+
+			await msg.addReaction(prevPageEmoji);
+			await msg.addReaction(nextPageEmoji);
+			await msg.addReaction(equipEmoji);
+
+			collector.on('collect', async function (emoji) {
+				try {
+					if (emoji.name === nextPageEmoji) {
+						if (currentPage < totalPages) currentPage++;
+						else currentPage = 1;
+						page = await createPage(p, currentPage, totalPages);
+						await msg.edit({ embed: page.embed });
+					} else if (emoji.name === prevPageEmoji) {
+						if (currentPage > 1) currentPage--;
+						else currentPage = totalPages;
+						page = await createPage(p, currentPage, totalPages);
+						await msg.edit({ embed: page.embed });
+					} else if (emoji.name === equipEmoji && page.bid !== null) {
+						const uid = await p.global.getUid(p.msg.author.id);
+						const profiles = await p.mongo.collection('user_profile');
+						await profiles.updateOne(
+							{ uid },
+							{ $set: { bid: page.bid }, $setOnInsert: { uid } },
+							{ upsert: true }
+						);
+						page = await createPage(p, currentPage, totalPages);
+						await msg.edit({ embed: page.embed });
+					}
+				} catch (err) {
+					console.error('[wallpaper] Failed to handle wallpaper reaction:', err);
+				}
+			});
+
+			collector.on('end', async function (_reason) {
+				try {
+					page = await createPage(p, currentPage, totalPages);
+					page.embed.color = 6381923;
+					await msg.edit({
+						content: 'This message is now inactive',
+						embed: page.embed,
+					});
+				} catch (err) {
+					console.error('[wallpaper] Failed to close wallpaper viewer:', err);
+				}
+			});
+		} catch (err) {
+			console.error('[wallpaper] Failed to display wallpapers:', err);
+			p.errorMsg(', failed to load your wallpapers. Please try again later.', 3000);
+		}
 	},
 });
 
-async function createPage(p, page, totalPages) {
-	let sql = `SELECT b.*,up.uid AS profile FROM user u INNER JOIN user_backgrounds ub ON u.uid = ub.uid INNER JOIN backgrounds b ON ub.bid = b.bid LEFT JOIN user_profile up ON u.uid = up.uid AND up.bid = ub.bid WHERE id = ${
-		p.msg.author.id
-	} ORDER BY ub.bid LIMIT 1 OFFSET ${page - 1}`;
-	let result = await p.query(sql);
+async function getStartPage(p, totalPages) {
+	if (totalPages <= 0 || p.args.length <= 0) return 1;
 
-	let embed = {
+	if (!p.global.isInt(p.args[0])) {
+		p.errorMsg(', please provide a valid wallpaper id, for example `owo wallpaper 202`.', 3000);
+		return null;
+	}
+
+	const bid = parseInt(p.args[0], 10) - offsetID;
+	const uid = await p.global.getUid(p.msg.author.id);
+	const inventory = await p.mongo.collection('user_backgrounds');
+	const ownership = await inventory.findOne({ uid, bid }, { projection: { bid: 1 } });
+
+	if (!ownership) {
+		p.errorMsg(", you don't own a wallpaper with that id!", 3000);
+		return null;
+	}
+
+	const previous = await inventory.countDocuments({ uid, bid: { $lt: bid } });
+	return previous + 1;
+}
+
+async function createPage(p, page, totalPages) {
+	const uid = await p.global.getUid(p.msg.author.id);
+	const inventory = await p.mongo.collection('user_backgrounds');
+	const backgrounds = await p.mongo.collection('backgrounds');
+	const profiles = await p.mongo.collection('user_profile');
+	const ownership = await inventory
+		.find({ uid })
+		.sort({ bid: 1 })
+		.skip(Math.max(0, page - 1))
+		.limit(1)
+		.next();
+	const background = ownership ? await backgrounds.findOne({ bid: ownership.bid }) : null;
+	const profile = await profiles.findOne({ uid }, { projection: { bid: 1 } });
+
+	const embed = {
 		author: {
 			name: p.getName() + "'s wallpapers",
 			icon_url: p.msg.author.avatarURL,
@@ -98,23 +148,25 @@ async function createPage(p, page, totalPages) {
 		},
 	};
 
-	if (result[0]) {
-		embed.description = '`' + (offsetID + result[0].bid) + '` **' + result[0].bname + '**';
+	if (background) {
+		embed.description = '`' + (offsetID + background.bid) + '` **' + background.bname + '**';
 		embed.image = {
-			url: `${process.env.GEN_HOST}/background/${result[0].bid}.png`,
+			url: `${process.env.GEN_HOST}/background/${background.bid}.png`,
 		};
-		if (result[0].profile) embed.description += '   *Currently Equipped*';
-		embed.bid = result[0].bid;
+		if (profile?.bid === background.bid) embed.description += '   *Currently Equipped*';
 	} else {
 		embed.description = "You don't have any wallpapers! :c Purchase one in `owo shop`!";
 		delete embed.footer;
 	}
 
-	return { embed };
+	return {
+		embed,
+		bid: background?.bid ?? null,
+	};
 }
 
 async function getTotalPages(p) {
-	let sql = `SELECT COUNT(bid) AS count FROM user u INNER JOIN user_backgrounds ub ON u.uid = ub.uid WHERE id = ${p.msg.author.id};`;
-	let result = await p.query(sql);
-	return result[0].count;
+	const uid = await p.global.getUid(p.msg.author.id);
+	const inventory = await p.mongo.collection('user_backgrounds');
+	return inventory.countDocuments({ uid });
 }

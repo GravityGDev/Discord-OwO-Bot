@@ -5,7 +5,6 @@
  * For more information, see README.md and LICENSE
  */
 
-const mysql = require('../../../../utils/mysql.js');
 const WeaponInterface = require('../WeaponInterface.js');
 
 const maxAnimals = 6;
@@ -18,29 +17,19 @@ const stopStreak = {
 	end: 1696143600000,
 };
 
-let minPgid = 0;
-let maxPgid = 0;
-mysql.con.query('SELECT pgid FROM pet_team ORDER BY pgid ASC LIMIT 1', (err, result) => {
-	if (err) throw err;
-	minPgid = result[0]?.pgid || 0;
-});
-mysql.con.query('SELECT pgid FROM pet_team ORDER BY pgid DESC LIMIT 1', (err, result) => {
-	if (err) throw err;
-	maxPgid = result[0]?.pgid || 0;
-});
-setInterval(() => {
-	mysql.con.query('SELECT pgid FROM pet_team ORDER BY pgid DESC LIMIT 1', (err, result) => {
-		if (err) throw err;
-		maxPgid = result[0]?.pgid || 0;
-	});
-}, 60 * 1000);
-
 exports.getRandomPgid = async function () {
-	const rand = minPgid + Math.floor(Math.random() * (maxPgid - minPgid));
-	const sql = `SELECT pt.pgid FROM pet_team pt LEFT JOIN pet_team_animal pta ON pt.pgid = pta.pgid WHERE pt.pgid >= ${rand} AND pta.pgid IS NOT NULL limit 1;`;
-	const result = await this.query(sql);
-	if (!result[0]) return 0;
-	return result[0].pgid;
+	const teamAnimals = await this.mongo.collection('pet_team_animal');
+	const first = await teamAnimals.findOne({}, { sort: { pgid: 1 }, projection: { pgid: 1 } });
+	const last = await teamAnimals.findOne({}, { sort: { pgid: -1 }, projection: { pgid: 1 } });
+	if (!first?.pgid || !last?.pgid) return 0;
+
+	const rand = first.pgid + Math.floor(Math.random() * Math.max(1, last.pgid - first.pgid));
+	let result = await teamAnimals.findOne(
+		{ pgid: { $gte: rand } },
+		{ sort: { pgid: 1 }, projection: { pgid: 1 } }
+	);
+	if (!result) result = first;
+	return result?.pgid || 0;
 };
 
 /* Do stuff before the turn starts (usually for buffs) */
@@ -105,23 +94,17 @@ exports.executeTurn = function (team, enemy) {
 		let log;
 
 		if (animal) {
-			// Animal is not allowed to attack
 			if (animal.disabled && !animal.disabled.canAttack) {
 				if (animal.disabled.logs && animal.disabled.logs.logs.length > 0)
 					logs = logs.concat(animal.disabled.logs.logs);
-
-				// Animal has a weapon
 			} else if (animal.weapon) {
 				if (tempAction == weapon) log = animal.weapon.attackWeapon(animal, tempAlly, tempEnemy);
 				else log = animal.weapon.attackPhysical(animal, tempAlly, tempEnemy);
-
-				// Animal has no weapon
 			} else {
 				log = WeaponInterface.basicAttack(animal, tempAlly, tempEnemy);
 			}
 		}
 
-		// Combine all the logs
 		if (log) logs = logs.concat(log.logs);
 	}
 
@@ -193,7 +176,6 @@ exports.removeBuffs = function (team, enemy) {
 
 /* Calculate xp depending on win/loss/tie */
 exports.calculateXP = function (team, enemy, currentStreak = 0) {
-	/* Find the avg level diff for xp multipliers */
 	let playeravg = 0;
 	for (let i in team.team.team) playeravg += team.team.team[i].stats.lvl;
 	playeravg /= team.team.team.length;
@@ -205,24 +187,19 @@ exports.calculateXP = function (team, enemy, currentStreak = 0) {
 	let lvlDiff = enemyavg - playeravg;
 	if (lvlDiff < 0) lvlDiff = 0;
 
-	/* Calculate xp and streak */
-	/* lose */
 	let xp = 50;
 	let resetStreak = true;
 	let addStreak = false;
 	let bonus = 0;
-	/* tie */
 	if (team.win && enemy.win) {
 		resetStreak = false;
 		addStreak = false;
 		xp = 100;
-		/* win */
 	} else if (team.win) {
 		resetStreak = false;
 		addStreak = true;
 		xp = 200;
 		bonus = Math.round(600 * lvlDiff);
-		/* Calculate bonus */
 		currentStreak++;
 		bonus += bonusXP(currentStreak);
 	}
@@ -260,7 +237,6 @@ exports.calculateXP = function (team, enemy, currentStreak = 0) {
 	};
 };
 
-/* Bonus xp depending on the streak */
 function bonusXP(streak) {
 	if (shouldStopStreak()) {
 		return 100;
@@ -277,7 +253,6 @@ function bonusXP(streak) {
 	return bonus;
 }
 
-/* Test bonus xp */
 /*
 let totalxp = 0;
 let pxp = 0;
@@ -289,7 +264,6 @@ for(let i = 35000;i<=40000;i+=10){
 }
 */
 
-/* Saves both team's status */
 exports.saveStates = function (battle) {
 	let player = [];
 	for (let i in battle.player.team) {
@@ -322,13 +296,11 @@ exports.saveStates = function (battle) {
 	return { player, enemy };
 };
 
-/* parses animal info for logs */
 function parseAnimalInfo(animal) {
 	let info = animal;
 	return info;
 }
 
-/* Updates the previous hp/wp */
 exports.updatePreviousStats = function (battle) {
 	for (let i in battle.player.team) {
 		battle.player.team[i].stats.hp[2] = battle.player.team[i].stats.hp[0];
@@ -354,8 +326,6 @@ exports.getStopStreak = function () {
 
 exports.getBattleSetting = async function (id) {
 	id = id || this.msg.author.id;
-	let sql = `SELECT logs,auto,display,speed from user INNER JOIN battle_settings ON user.uid = battle_settings.uid WHERE id = ${id};`;
-	let result = await this.query(sql);
 
 	let bs = {
 		auto: true,
@@ -364,27 +334,31 @@ exports.getBattleSetting = async function (id) {
 		showLogs: false,
 	};
 
-	if (!result[0]) {
-		return bs;
-	}
+	const users = await this.mongo.collection('user');
+	const user = await users.findOne({ id: String(id) }, { projection: { uid: 1 } });
+	if (!user?.uid) return bs;
 
-	if (result[0].speed == 0) {
+	const settings = await this.mongo.collection('battle_settings');
+	const result = await settings.findOne({ uid: user.uid });
+	if (!result) return bs;
+
+	if (result.speed == 0) {
 		bs.speed = 'instant';
-	} else if (result[0].speed == 2) {
+	} else if (result.speed == 2) {
 		bs.speed = 'lengthy';
 	}
 
-	if (result[0].display == 'text') {
+	if (result.display == 'text') {
 		bs.display = 'text';
-	} else if (result[0].display == 'compact') {
+	} else if (result.display == 'compact') {
 		bs.display = 'compact';
 	}
 
-	if (result[0].logs == 1) {
+	if (result.logs == 1) {
 		bs.showLogs = true;
 		bs.auto = true;
 		bs.speed = 'instant';
-	} else if (result[0].logs == 2) {
+	} else if (result.logs == 2) {
 		bs.showLogs = 'link';
 		bs.auto = true;
 	}

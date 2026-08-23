@@ -7,11 +7,12 @@
 
 const CommandInterface = require('../../CommandInterface.js');
 
-let captcha;
+let captcha = null;
 try {
 	captcha = require('../../../../../tokens/captcha.js');
 } catch (err) {
-	console.error('Could not find captcha.js admin captcha command will not work');
+	// The original captcha generator is a private deployment module and is not
+	// included in this repository. Keep the owner command loadable without it.
 }
 
 module.exports = new CommandInterface({
@@ -20,6 +21,11 @@ module.exports = new CommandInterface({
 	owner: true,
 
 	execute: async function (p) {
+		if (!captcha?.gen) {
+			p.errorMsg(', The private captcha generator is not configured on this deployment.', 3000);
+			return;
+		}
+
 		const opts = {};
 		if (p.args[0] == 'link') {
 			opts.forceUrl = true;

@@ -6,17 +6,10 @@
  */
 
 const CommandInterface = require('../../CommandInterface.js');
-
+const mongoNumeric = require('../../../utils/mongoNumeric.js');
 const patreon = require('../../../botHandlers/patreonHandler.js');
-var cowoncy = [
-	'184587051943985152',
-	'184587051943985152',
-	'184587051943985152',
-	'184587051943985152',
-	'184587051943985152',
-	'184587051943985152',
-	'184587051943985152',
-];
+const config = require('../../../data/config.json');
+let cowoncy = [config.owner];
 
 module.exports = new CommandInterface({
 	alias: ['getpatreons', 'distributecowoncy'],
@@ -33,19 +26,52 @@ module.exports = new CommandInterface({
 	},
 });
 
+function isActivePatreon(row) {
+	if (!row?.patreonTimer || !row?.patreonMonths) return false;
+	const expires = new Date(row.patreonTimer);
+	expires.setMonth(expires.getMonth() + Number(row.patreonMonths));
+	return expires > new Date();
+}
+
+async function getActivePatreonUsers(p) {
+	const patreonsCollection = await p.mongo.collection('patreons');
+	const active = (await patreonsCollection.find({ patreonMonths: { $gt: 0 } }).toArray()).filter(
+		isActivePatreon
+	);
+	if (!active.length) return [];
+
+	const uids = active.map((row) => row.uid);
+	const users = await p.mongo.collection('user');
+	const rows = await users.find({ uid: { $in: uids } }, { projection: { id: 1 } }).toArray();
+	return rows.map((row) => ({ id: String(row.id) }));
+}
+
+function displayPatreonUser(entry) {
+	const discord = entry.discord ? String(entry.discord) : 'Discord not linked';
+	const mention = entry.discord ? `<@${entry.discord}>` : 'No Discord account';
+	return `${mention} | **${entry.name || 'Hidden Patreon member'}** | ${discord}\n`;
+}
+
 async function getPatreons(p) {
+	const cookie = process.env.PATREON_COOKIE;
+	if (!cookie) {
+		await p.errorMsg(', PATREON_COOKIE is not configured in the private .env file.', 5000);
+		return;
+	}
+
 	let patreons;
 	try {
-		patreons = await patreon.request(p.args.join(' '));
+		patreons = await patreon.request(cookie);
 	} catch (err) {
 		console.error(err);
 		return;
 	}
+
+	const flags = new Set(p.args.map((arg) => String(arg).toLowerCase()));
+	const ignoreStoredPatreons = flags.has('ignoremongo') || flags.has('ignoresql');
 	let result = [];
-	if (p.args[0] != 'ignoresql') {
-		let sql =
-			'SELECT id FROM user INNER JOIN patreons ON user.uid = patreons.uid WHERE TIMESTAMPDIFF(MONTH,patreonTimer,NOW())<patreonMonths;';
-		result = await p.query(sql);
+	if (!ignoreStoredPatreons) {
+		result = await getActivePatreonUsers(p);
 	}
 
 	let text = '';
@@ -53,55 +79,54 @@ async function getPatreons(p) {
 	console.log('customized commands');
 	if (patreons.customizedCommand.length) {
 		text += '**Customized Command**\n';
-		let list = patreons.customizedCommand;
-		for (let i in list) {
-			text += '<@' + list[i].discord + '> | **' + list[i].name + '** | ' + list[i].discord + '\n';
-		}
+		for (const entry of patreons.customizedCommand) text += displayPatreonUser(entry);
 	}
 
 	console.log('custom commands');
 	if (patreons.customCommand.length) {
 		text += '\n**Custom Command**\n';
-		let list = patreons.customCommand;
-		for (let i in list) {
-			text += '<@' + list[i].discord + '> | **' + list[i].name + '** | ' + list[i].discord + '\n';
-		}
+		for (const entry of patreons.customCommand) text += displayPatreonUser(entry);
 	}
 
 	console.log('custom pet');
 	let csv =
-		'Discord Name,Discord ID,Patreon Name,Pet Name,hp str pr wp mag mr,Pet Desc,Pet ID,SQL\n';
+		'Discord Name,Discord ID,Patreon Name,Pet Name,hp str pr wp mag mr,Pet Desc,Pet ID,MongoDB\n';
 	if (patreons.pet.length) {
 		text += '\n**Custom Pet**\n';
-		let list = patreons.pet;
-		for (let i in list) {
-			text += '<@' + list[i].discord + '> | **' + list[i].name + '** | ' + list[i].discord + '\n';
-			let user = await p.fetch.getUser(list[i].discord);
-			csv += (user ? user.username : 'A User') + ',' + list[i].discord + ',' + list[i].name + '\n';
+		for (const entry of patreons.pet) {
+			text += displayPatreonUser(entry);
+			let user;
+			if (entry.discord) user = await p.fetch.getUser(String(entry.discord));
+			csv +=
+				(user ? user.username : 'A User') +
+				',' +
+				(entry.discord || '') +
+				',' +
+				(entry.name || 'Hidden Patreon member') +
+				'\n';
 		}
 	}
 
 	console.log('monthly cowoncy');
 	cowoncy = [];
 	if (patreons.cowoncy.length) {
-		let list = patreons.cowoncy;
-		for (let i in list) {
-			if (list[i].discord) cowoncy.push(list[i].discord);
+		for (const entry of patreons.cowoncy) {
+			if (entry.discord && !cowoncy.includes(String(entry.discord))) {
+				cowoncy.push(String(entry.discord));
+			}
 		}
-		for (let i in result) {
-			if (!cowoncy.includes(result[i].id)) cowoncy.push(result[i].id);
-		}
+	}
+	for (const entry of result) {
+		if (!cowoncy.includes(String(entry.id))) cowoncy.push(String(entry.id));
 	}
 
 	console.log('done');
 
-	await p.send(text, null, null, { split: true });
+	if (text) await p.send(text, null, null, { split: true });
 	await p.send(
 		'Type `owo distributecowoncy {amount}` to send monthly cowoncy to ' +
-			patreons.cowoncy.length +
-			'+' +
-			result.length +
-			' users'
+			cowoncy.length +
+			' unique users'
 	);
 	await p.send('```' + csv + '```', null, null, {
 		split: { prepend: '```', append: '```' },
@@ -113,18 +138,28 @@ async function distributeCowoncy(p) {
 		p.errorMsg(', Invalid param', 4000);
 		return;
 	}
-	let amount = parseInt(p.args[0]);
-	let sql = `INSERT IGNORE INTO cowoncy (id,money) VALUES (${cowoncy.join(
-		',' + amount + '),('
-	)},${amount}) ON DUPLICATE KEY UPDATE money = money + ${amount};`;
-	let result = await p.query(sql);
+	const amount = parseInt(p.args[0]);
+	const balances = await p.mongo.collection('cowoncy');
+	let modified = 0;
+	for (const id of [...new Set(cowoncy.map(String))]) {
+		const result = await mongoNumeric.add(
+			balances,
+			{ id },
+			'money',
+			amount,
+			{ upsert: true },
+			{ id }
+		);
+		modified += result.modifiedCount || result.upsertedCount || 0;
+	}
+
 	let text =
 		'Distributed ' +
 		amount +
 		' cowoncy to ' +
 		cowoncy.length +
 		' users\n```json\n' +
-		JSON.stringify(result, null, 2) +
+		JSON.stringify({ recipients: cowoncy.length, modified }, null, 2) +
 		'```';
-	p.send(text);
+	await p.send(text);
 }

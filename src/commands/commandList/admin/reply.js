@@ -14,7 +14,6 @@ module.exports = new CommandInterface({
 	admin: true,
 
 	execute: async function (p) {
-		// Get feedback ID
 		let feedbackId = p.args.shift();
 		if (!p.global.isInt(feedbackId)) {
 			p.errorMsg(', Invalid feedback id!', 3000);
@@ -22,7 +21,6 @@ module.exports = new CommandInterface({
 		}
 		feedbackId = parseInt(feedbackId);
 
-		// Parse reply msgs
 		let reply = p.args.join(' ');
 		if (reply.length > 250) {
 			p.errorMsg(', Sorry! Messages must be under 250 character!!!');
@@ -32,16 +30,14 @@ module.exports = new CommandInterface({
 			return;
 		}
 
-		// query
-		let sql = 'SELECT type,message,sender FROM feedback WHERE id = ' + feedbackId + ';';
-		let result = await p.query(sql);
-		if (!result | !result[0]) {
+		const feedback = await p.mongo.collection('feedback');
+		const result = await feedback.findOne({ id: feedbackId });
+		if (!result) {
 			p.errorMsg(', Could not find that feedback id!', 3000);
 			return;
 		}
 
-		// Create reply msg
-		let user = await p.fetch.getUser(String(result[0].sender));
+		let user = await p.fetch.getUser(String(result.sender));
 		if (!user) {
 			p.errorMsg(', Could not find that user!', 3000);
 			return;
@@ -62,20 +58,9 @@ module.exports = new CommandInterface({
 					name: 'Thank you for your feedback!',
 					value: '===============================================',
 				},
-				{
-					name: 'Message ID',
-					value: feedbackId,
-					inline: true,
-				},
-				{
-					name: 'Message Type',
-					value: result[0].type,
-					inline: true,
-				},
-				{
-					name: 'Your Message',
-					value: '```' + result[0].message + '```',
-				},
+				{ name: 'Message ID', value: feedbackId, inline: true },
+				{ name: 'Message Type', value: result.type, inline: true },
+				{ name: 'Your Message', value: '```' + result.message + '```' },
 				{
 					name: 'Reply from Admin',
 					value: '```' + reply + '```\n\n===============================================',

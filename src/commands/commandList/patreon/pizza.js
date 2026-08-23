@@ -33,7 +33,7 @@ module.exports = new CommandInterface({
 
 	execute: async function (p) {
 		if (p.args.length == 0) {
-			display(p);
+			await display(p);
 			p.setCooldown(5);
 		} else {
 			let user = p.getMention(p.args[0]);
@@ -50,41 +50,54 @@ module.exports = new CommandInterface({
 				p.setCooldown(5);
 				return;
 			}
-			give(p, user);
+			await give(p, user);
 		}
 	},
 });
 
 async function display(p) {
-	let sql = `SELECT pizza.count FROM user LEFT JOIN pizza ON user.uid = pizza.uid WHERE id = ${p.msg.author.id};`;
-	let result = await p.query(sql);
-
-	let count = 0;
-	if (result[0] && result[0].count) count = result[0].count;
-
+	const uid = await p.global.getUid(p.msg.author.id);
+	const collection = await p.mongo.collection('pizza');
+	const result = await collection.findOne({ uid }, { projection: { count: 1 } });
+	const count = Number(result?.count || 0);
 	p.replyMsg(pizzaEmoji, ', You currently have **' + count + '** pizzas to give!');
 }
 
 async function give(p, user) {
-	if (p.msg.author.id != cosmonaut) {
-		// Subtract pizza
-		let sql = `UPDATE user LEFT JOIN pizza ON user.uid = pizza.uid SET pizza.count = pizza.count -1 WHERE id = ${p.msg.author.id} AND pizza.count>0;`;
-		let result = await p.query(sql);
+	const senderUid = await p.global.getUid(p.msg.author.id);
+	const receiverUid = await p.global.getUid(user.id);
+	const collection = await p.mongo.collection('pizza');
+	const session = await p.mongo.startSession();
 
-		// Error checking
-		if (result.changedRows == 0) {
-			p.errorMsg(', you do not have any pizza! >:c', 3000);
-			p.setCooldown(5);
-			return;
+	try {
+		session.startTransaction();
+		if (p.msg.author.id != cosmonaut) {
+			const debit = await collection.updateOne(
+				{ uid: senderUid, count: { $gt: 0 } },
+				{ $inc: { count: -1 } },
+				{ session }
+			);
+			if (!debit.modifiedCount) {
+				await session.abortTransaction();
+				p.errorMsg(', you do not have any pizza! >:c', 3000);
+				p.setCooldown(5);
+				return;
+			}
 		}
-	}
 
-	// Add two pizza
-	let sql = `INSERT IGNORE INTO pizza (uid,count) VALUES ((SELECT uid FROM user WHERE id = ${user.id}),2) ON DUPLICATE KEY UPDATE count = count + 2;`;
-	let result = await p.query(sql);
-	if (result.warningCount > 0) {
-		sql = `INSERT IGNORE INTO user (id,count) VALUES (${user.id},0);${sql}`;
-		await p.query(sql);
+		await collection.updateOne(
+			{ uid: receiverUid },
+			{ $inc: { count: 2 }, $setOnInsert: { uid: receiverUid } },
+			{ upsert: true, session }
+		);
+		await session.commitTransaction();
+	} catch (err) {
+		if (session.inTransaction()) await session.abortTransaction();
+		console.error(err);
+		p.errorMsg(', I failed to give that pizza. Please try again.', 3000);
+		return;
+	} finally {
+		await session.endSession();
 	}
 
 	p.replyMsg(

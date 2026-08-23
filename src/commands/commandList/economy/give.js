@@ -9,6 +9,7 @@ const CommandInterface = require('../../CommandInterface.js');
 
 const alterGive = require('../patreon/alterGive.js');
 const cowoncyUtils = require('./utils/cowoncyUtils.js');
+const mongoNumeric = require('../../../utils/mongoNumeric.js');
 
 const ongoingTransactions = {};
 
@@ -119,14 +120,18 @@ async function sendMoney(user, amount, message) {
 	}
 	addOngoing(this.msg.author.id, user.id);
 
-	const con = await this.startTransaction();
+	const session = await this.mongo.startSession();
 	try {
-		const canGive = await cowoncyUtils.canGive.bind(this)(this.msg.author, user, amount, con, {
-			skipCowoncyCheck: true,
-			isTransaction: true,
-		});
+		session.startTransaction();
+
+		const canGive = await cowoncyUtils.canGiveMongo.bind(this)(
+			this.msg.author,
+			user,
+			amount,
+			{ skipCowoncyCheck: true, session }
+		);
 		if (canGive.error) {
-			await con.rollback();
+			await session.abortTransaction();
 			const text = await alterGive.alter(this, this.msg.author.id, null, {
 				from: this.msg.author,
 				to: user,
@@ -146,14 +151,18 @@ async function sendMoney(user, amount, message) {
 			return false;
 		}
 
-		let sql = `UPDATE cowoncy SET money = money - ${amount} WHERE id = ${this.msg.author.id} AND money >= ${amount};`;
-		sql += `INSERT INTO cowoncy (id, money) VALUES (${user.id}, ${amount}) ON DUPLICATE KEY UPDATE money = money + ${amount};`;
-		sql += `INSERT INTO transaction (sender, reciever, amount) VALUES (${this.msg.author.id}, ${user.id}, ${amount});`;
-		sql += canGive.sql;
-		let result = await con.query(sql);
+		const cowoncy = await this.mongo.collection('cowoncy');
+		const transactions = await this.mongo.collection('transaction');
+		const debit = await mongoNumeric.subtractIfEnough(
+			cowoncy,
+			{ id: String(this.msg.author.id) },
+			'money',
+			amount,
+			{ session }
+		);
 
-		if (!result[0].changedRows) {
-			await con.rollback();
+		if (!debit.modifiedCount) {
+			await session.abortTransaction();
 			const text = await alterGive.alter(this, this.msg.author.id, null, {
 				from: this.msg.author,
 				to: user,
@@ -173,15 +182,36 @@ async function sendMoney(user, amount, message) {
 			return false;
 		}
 
-		await con.commit();
+		await mongoNumeric.add(
+			cowoncy,
+			{ id: String(user.id) },
+			'money',
+			amount,
+			{ session, upsert: true },
+			{ id: String(user.id) }
+		);
+		await transactions.insertOne(
+			{
+				sender: String(this.msg.author.id),
+				reciever: String(user.id),
+				amount: mongoNumeric.integerString(amount),
+				createdAt: new Date(),
+			},
+			{ session }
+		);
+		await cowoncyUtils.applyGiveLimitsMongo.bind(this)(canGive, { session });
+
+		await session.commitTransaction();
 		removeOngoing(this.msg.author.id, user.id);
 		return true;
 	} catch (err) {
 		console.error(err);
 		this.errorMsg(', there was an error sending cowoncy! Please try again later.', 3000);
-		await con.rollback();
+		if (session.inTransaction()) await session.abortTransaction();
 		removeOngoing(this.msg.author.id, user.id);
 		return false;
+	} finally {
+		await session.endSession();
 	}
 }
 
@@ -321,7 +351,7 @@ async function confirmation(user, amount) {
 }
 
 async function checkLimit(user, amount) {
-	const canGive = await cowoncyUtils.canGive.bind(this)(this.msg.author, user, amount, this);
+	const canGive = await cowoncyUtils.canGiveMongo.bind(this)(this.msg.author, user, amount);
 	if (canGive.error) {
 		const text = await alterGive.alter(this, this.msg.author.id, null, {
 			from: this.msg.author,

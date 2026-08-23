@@ -8,167 +8,198 @@
 const teamUtil = require('../../battle/util/teamUtil.js');
 const sku = '1164099862984400926';
 
+async function insertDefaults(collection, rows, filterKeys) {
+	if (!rows.length) return;
+	await collection.bulkWrite(
+		rows.map((row) => {
+			const filter = {};
+			for (const key of filterKeys) filter[key] = row[key];
+			return {
+				updateOne: {
+					filter,
+					update: { $setOnInsert: row },
+					upsert: true,
+				},
+			};
+		})
+	);
+}
+
 exports.giveCustomBattle = async function (p, id) {
 	const uid = await p.global.getUid(id);
-	const sql = `INSERT into alterbattle (uid, type, color, footer, author) VALUES
-		(${uid}, 'win', 65280,
-			'You won in {turns} turns! Your team gained {xp} xp! Streak: {streak}', '{username} goes into battle'),
-		(${uid}, 'lose', 16711680,
-			'You lost in {turns} turns! Your team gained {xp} xp! You lost your streak of {streak} wins...', '{username} goes into battle'),
-		(${uid}, 'tie', 6381923,
-			"It\'s a tie in {turns} turns! Your team gained {xp} xp! Streak: {streak}", '{username} goes into battle');`;
-	await p.query(sql);
+	const collection = await p.mongo.collection('alterbattle');
+	await insertDefaults(
+		collection,
+		[
+			{
+				uid,
+				type: 'win',
+				color: 65280,
+				footer: 'You won in {turns} turns! Your team gained {xp} xp! Streak: {streak}',
+				author: '{username} goes into battle',
+			},
+			{
+				uid,
+				type: 'lose',
+				color: 16711680,
+				footer:
+					'You lost in {turns} turns! Your team gained {xp} xp! You lost your streak of {streak} wins...',
+				author: '{username} goes into battle',
+			},
+			{
+				uid,
+				type: 'tie',
+				color: 6381923,
+				footer: "It's a tie in {turns} turns! Your team gained {xp} xp! Streak: {streak}",
+				author: '{username} goes into battle',
+			},
+		],
+		['uid', 'type']
+	);
 };
 
 exports.giveCustomHunt = async function (p, id) {
 	const uid = await p.global.getUid(id);
-	const sql = `INSERT INTO alterhunt (uid, type) VALUES
-		(${uid}, 'gems'),
-		(${uid}, 'nogems');`;
-	await p.query(sql);
+	const collection = await p.mongo.collection('alterhunt');
+	await insertDefaults(
+		collection,
+		[
+			{ uid, type: 'gems' },
+			{ uid, type: 'nogems' },
+		],
+		['uid', 'type']
+	);
 };
 
-exports.giveCustomCowoncy = async function (p, id) {
+async function giveAlterRows(p, id, rows) {
 	const uid = await p.global.getUid(id);
-	const sql = `INSERT INTO \`alter\` (uid, command, type) VALUES
-		(${uid}, 'cowoncy', 'display');`;
-	await p.query(sql);
+	const collection = await p.mongo.collection('alter');
+	await insertDefaults(
+		collection,
+		rows.map((row) => ({ uid, ...row })),
+		['uid', 'command', 'type']
+	);
+}
+
+exports.giveCustomCowoncy = async function (p, id) {
+	await giveAlterRows(p, id, [{ command: 'cowoncy', type: 'display' }]);
 };
 
 exports.giveCustomGive = async function (p, id) {
-	const uid = await p.global.getUid(id);
-	const sql = `INSERT INTO \`alter\` (uid, command, type) VALUES
-		(${uid}, 'give', 'give'),
-		(${uid}, 'give',  'none'),
-		(${uid}, 'give',  'senderlimit'),
-		(${uid}, 'give',  'senderoverlimit'),
-		(${uid}, 'give',  'receivelimit'),
-		(${uid}, 'give',  'receiveoverlimit'),
-		(${uid}, 'give',  'receive');`;
-	await p.query(sql);
+	await giveAlterRows(p, id, [
+		{ command: 'give', type: 'give' },
+		{ command: 'give', type: 'none' },
+		{ command: 'give', type: 'senderlimit' },
+		{ command: 'give', type: 'senderoverlimit' },
+		{ command: 'give', type: 'receivelimit' },
+		{ command: 'give', type: 'receiveoverlimit' },
+		{ command: 'give', type: 'receive' },
+	]);
 };
 
 exports.giveCustomPray = async function (p, id) {
-	const uid = await p.global.getUid(id);
-	const sql = `INSERT INTO \`alter\` (uid, command, type) VALUES
-		(${uid}, 'pray', 'pray'),
-		(${uid}, 'pray', 'prayself'),
-		(${uid}, 'pray', 'receivepray'),
-		(${uid}, 'pray', 'curse'),
-		(${uid}, 'pray', 'curseself'),
-		(${uid}, 'pray',  'receivecurse');`;
-	await p.query(sql);
+	await giveAlterRows(p, id, [
+		{ command: 'pray', type: 'pray' },
+		{ command: 'pray', type: 'prayself' },
+		{ command: 'pray', type: 'receivepray' },
+		{ command: 'pray', type: 'curse' },
+		{ command: 'pray', type: 'curseself' },
+		{ command: 'pray', type: 'receivecurse' },
+	]);
 };
 
 exports.giveCustomInventory = async function (p, id) {
-	const uid = await p.global.getUid(id);
-	const sql = `INSERT INTO \`alter\` (uid, command, type) VALUES
-		(${uid}, 'inventory',  'display');`;
-	await p.query(sql);
+	await giveAlterRows(p, id, [{ command: 'inventory', type: 'display' }]);
 };
 
 exports.giveCustomDaily = async function (p, id) {
-	const uid = await p.global.getUid(id);
-	const sql = `INSERT INTO \`alter\` (uid, command, type) VALUES
-		(${uid}, 'daily', 'display'),
-		(${uid}, 'daily', 'cooldown'),
-		(${uid}, 'daily', 'marriage')`;
-	await p.query(sql);
+	await giveAlterRows(p, id, [
+		{ command: 'daily', type: 'display' },
+		{ command: 'daily', type: 'cooldown' },
+		{ command: 'daily', type: 'marriage' },
+	]);
 };
 
 exports.giveCustomWeapon = async function (p, id) {
-	const uid = await p.global.getUid(id);
-	const sql = `INSERT INTO \`alter\` (uid, command, type) VALUES
-		(${uid}, 'weapon',  'display');`;
-	await p.query(sql);
+	await giveAlterRows(p, id, [{ command: 'weapon', type: 'display' }]);
 };
 
 exports.giveCustomCookie = async function (p, id) {
-	const uid = await p.global.getUid(id);
-	const sql = `INSERT INTO \`alter\` (uid, command, type) VALUES
-		(${uid}, 'cookie',  'ready'),
-		(${uid}, 'cookie',  'give'),
-		(${uid}, 'cookie',  'cooldown'),
-		(${uid}, 'cookie',  'receive');`;
-	await p.query(sql);
+	await giveAlterRows(p, id, [
+		{ command: 'cookie', type: 'ready' },
+		{ command: 'cookie', type: 'give' },
+		{ command: 'cookie', type: 'cooldown' },
+		{ command: 'cookie', type: 'receive' },
+	]);
 };
 
 exports.giveCustomZoo = async function (p, id) {
-	const uid = await p.global.getUid(id);
-	const sql = `INSERT INTO \`alter\` (uid, command, type) VALUES
-		(${uid}, 'zoo',  'paged'),
-		(${uid}, 'zoo',  'message');`;
-	await p.query(sql);
+	await giveAlterRows(p, id, [
+		{ command: 'zoo', type: 'paged' },
+		{ command: 'zoo', type: 'message' },
+	]);
 };
 
 exports.getSupporterRank = async function (p, user) {
 	if (user.supporterRank) {
 		const now = new Date();
 		const updateDiff = new Date() - user.supporterRank.updatedOn;
-		// Refresh if its past a day
 		if (updateDiff >= 1000 * 60 * 60 * 24) {
 			delete user.supporterRank;
-			// User supporter rank is already cached
 		} else if (user.supporterRank.endTime > now) {
 			return user.supporterRank;
-			// If user does not have supporter rank
 		} else {
 			user.supporterRank.endTime = null;
 			user.supporterRank.benefitRank = 0;
-			if (updateDiff <= 20 * 1000 /** 60 * 60*/) {
-				return user.supporterRank;
-			}
+			if (updateDiff <= 20 * 1000) return user.supporterRank;
 		}
 	}
 
 	const uid = await p.global.getUid(user.id);
-	const sql = `
-		SELECT * FROM patreons WHERE uid = ${uid};
-		SELECT * FROM patreon_wh WHERE uid = ${uid};
-		SELECT * FROM patreon_discord WHERE uid = ${uid};
-	`;
-	const result = await p.query(sql);
+	const patreons = await p.mongo.collection('patreons');
+	const whitelist = await p.mongo.collection('patreon_wh');
+	const discord = await p.mongo.collection('patreon_discord');
+	const [patreonRow, whitelistRows, discordRow] = await Promise.all([
+		patreons.findOne({ uid }),
+		whitelist.find({ uid }).toArray(),
+		discord.findOne({ uid }),
+	]);
 
 	const supporter = {
 		endTime: null,
 		benefitRank: 0,
 		updatedOn: new Date(),
 	};
-	if (result[0][0]?.patreonTimer) {
-		const benefitRank = result[0][0].patreonType;
-		const startTime = new Date(result[0][0].patreonTimer);
-		const endTime = new Date(startTime.setMonth(startTime.getMonth() + result[0][0].patreonMonths));
+	if (patreonRow?.patreonTimer) {
+		const benefitRank = patreonRow.patreonType;
+		const startTime = new Date(patreonRow.patreonTimer);
+		const endTime = new Date(startTime.setMonth(startTime.getMonth() + patreonRow.patreonMonths));
 		getBetterSupporterRank(supporter, benefitRank, endTime);
 	}
-	if (result[1].length) {
-		result[1].forEach((row) => {
-			const benefitRank = row.patreonType;
-			const endTime = new Date(row.endDate);
-			getBetterSupporterRank(supporter, benefitRank, endTime);
-		});
+	for (const row of whitelistRows) {
+		getBetterSupporterRank(supporter, row.patreonType, new Date(row.endDate));
 	}
-	if (result[2][0]) {
-		const benefitRank = result[2][0].patreonType;
-		let endTime = new Date(result[2][0].endDate);
-		if (result[2][0].active) {
+	if (discordRow) {
+		const benefitRank = discordRow.patreonType;
+		let endTime = new Date(discordRow.endDate);
+		if (discordRow.active) {
 			endTime = new Date();
 			endTime = new Date(endTime.setMonth(endTime.getMonth() + 1));
 		}
 		getBetterSupporterRank(supporter, benefitRank, endTime);
 	}
 
+	const teams = await p.mongo.collection('pet_team');
+	const activeTeams = await p.mongo.collection('pet_team_active');
 	if (supporter.benefitRank >= 3) {
-		let sql = `UPDATE IGNORE pet_team SET disabled = 0 WHERE disabled = 1 AND uid = ${uid};`;
-		await p.query(sql);
+		await teams.updateMany({ uid, disabled: 1 }, { $set: { disabled: 0 } });
 	} else {
-		let sql = `SELECT pt.*, pta.pgid AS active FROM pet_team pt LEFT JOIN pet_team_active pta  ON pt.pgid = pta.pgid WHERE pt.uid = ${uid} ORDER BY pt.pgid ASC;`;
-		const result = await p.query(sql);
-		const maxTeams = await teamUtil.getMaxTeams.bind(p)(p.msg.author, supporter);
-		if (result.length > maxTeams) {
-			const pgid = result[result.length - 1].pgid;
-			sql = `UPDATE pet_team SET disabled = 1 WHERE pgid = ${pgid};
-					DELETE FROM pet_team_active WHERE pgid = ${pgid};`;
-			await p.query(sql);
+		const teamRows = await teams.find({ uid }).sort({ pgid: 1 }).toArray();
+		const maxTeams = await teamUtil.getMaxTeams.bind(p)(user, supporter);
+		if (teamRows.length > maxTeams) {
+			const pgid = teamRows[teamRows.length - 1].pgid;
+			await teams.updateOne({ pgid }, { $set: { disabled: 1 } });
+			await activeTeams.deleteOne({ pgid });
 		}
 	}
 
@@ -178,16 +209,12 @@ exports.getSupporterRank = async function (p, user) {
 
 function getBetterSupporterRank(supporter, benefitRank, endTime) {
 	const now = new Date();
-	if (endTime < now) {
-		return;
-	}
+	if (endTime < now) return;
 	if (benefitRank > supporter.benefitRank) {
 		supporter.endTime = endTime;
 		supporter.benefitRank = benefitRank;
-	} else if (benefitRank == supporter.benefitRank) {
-		if (endTime > supporter.endTime) {
-			supporter.endTime = endTime;
-		}
+	} else if (benefitRank == supporter.benefitRank && endTime > supporter.endTime) {
+		supporter.endTime = endTime;
 	}
 }
 
@@ -199,26 +226,19 @@ exports.handleDiscordUpdate = async function (entitlement) {
 	}
 
 	const uid = await this.global.getUid(userId);
-	let sql = `SELECT * FROM patreon_discord WHERE uid = ${uid};`;
-	let result = await this.query(sql);
+	const collection = await this.mongo.collection('patreon_discord');
+	const existing = await collection.findOne({ uid });
 	let renewal = false;
-	if (result[0]) {
-		const end = new Date(result[0].endDate);
-		const active = result[0].active;
+	if (existing) {
+		const end = new Date(existing.endDate);
 		const now = new Date();
-		if (end >= now || active) {
-			renewal = true;
-		}
+		if (end >= now || existing.active) renewal = true;
 	}
 
 	active = active ? 1 : 0;
-	if (endDate) {
-		let mysqlDate = this.global.toMySQL(endDate);
-		sql = `INSERT INTO patreon_discord (uid, patreonType, endDate, active) VALUES (${uid}, 3, ${mysqlDate}, ${active}) ON DUPLICATE KEY UPDATE endDate = ${mysqlDate}, active = ${active};`;
-	} else {
-		sql = `INSERT INTO patreon_discord (uid, patreonType, active) VALUES (${uid}, 3, ${active}) ON DUPLICATE KEY UPDATE active = ${active};`;
-	}
-	await this.query(sql);
+	const set = { patreonType: 3, active };
+	if (endDate) set.endDate = endDate;
+	await collection.updateOne({ uid }, { $set: set, $setOnInsert: { uid } }, { upsert: true });
 
 	if (!renewal) {
 		let txt = `${this.config.emoji.owo.woah} **|** Thank you for supporting OwO Bot! Your account should have access to supporter benefits.`;
@@ -229,10 +249,10 @@ exports.handleDiscordUpdate = async function (entitlement) {
 
 exports.handleDiscordDelete = async function (entitlement) {
 	const userId = entitlement.user_id;
-	const uid = await this.global.getUid(entitlement.user_id);
-	const sql = `DELETE FROM patreon_discord WHERE uid = ${uid};`;
-	const result = await this.query(sql);
-	if (result.affectedRows > 0) {
+	const uid = await this.global.getUid(userId);
+	const collection = await this.mongo.collection('patreon_discord');
+	const result = await collection.deleteOne({ uid });
+	if (result.deletedCount > 0) {
 		let txt = `${this.config.emoji.owo.cry} **|** It looks like your Discord payment failed.`;
 		txt += `\n${this.config.emoji.blank} **|** You will no longer receive OwO Bot supporter benefits.`;
 		txt += `\n${this.config.emoji.blank} **|** If you have any questions, please stop by our support server: ${this.config.guildlink}`;
@@ -240,20 +260,13 @@ exports.handleDiscordDelete = async function (entitlement) {
 	}
 };
 
-function parseEntitlement(entitlment) {
-	if (entitlment.sku_id !== sku) {
-		return { error: 'Invalid SKU' };
-	}
-	const userId = entitlment.user_id;
-	if (!userId) {
-		return { error: 'Invalid User' };
-	}
+function parseEntitlement(entitlement) {
+	if (entitlement.sku_id !== sku) return { error: 'Invalid SKU' };
+	const userId = entitlement.user_id;
+	if (!userId) return { error: 'Invalid User' };
 	let endDate;
 	let active = false;
-	if (!entitlment.ends_at) {
-		active = true;
-	} else {
-		endDate = new Date(entitlment.ends_at);
-	}
+	if (!entitlement.ends_at) active = true;
+	else endDate = new Date(entitlement.ends_at);
 	return { userId, endDate, active };
 }

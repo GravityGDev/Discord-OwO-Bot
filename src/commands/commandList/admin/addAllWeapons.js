@@ -30,36 +30,31 @@ module.exports = new CommandInterface({
 		if (!uid) {
 			return p.errorMsg(', invalid user id');
 		}
-		let sql = `SELECT uw.uwid, uw.wid, uwp.wpid
-			FROM user_weapon uw
-				LEFT JOIN user_weapon_passive uwp ON uw.uwid = uwp.uwid
-			WHERE uid = ${uid} AND avg = ${stat};`;
-		let result = await p.query(sql);
 
-		let existingWeapons = {};
-		result.forEach((weapon) => {
-			if (!existingWeapons[weapon.uwid]) {
-				existingWeapons[weapon.uwid] = {
-					wid: weapon.wid,
-					wpid: [],
-				};
-			}
-			if (weapon.wpid) {
-				existingWeapons[weapon.uwid].wpid.push(weapon.wpid);
-			}
-		});
+		const weaponsCollection = await p.mongo.collection('user_weapon');
+		const weaponRows = await weaponsCollection.find({ uid, avg: stat }).toArray();
+		const uwids = weaponRows.map((weapon) => weapon.uwid);
+		const passiveCollection = await p.mongo.collection('user_weapon_passive');
+		const passiveRows = uwids.length
+			? await passiveCollection
+					.find({ uwid: { $in: uwids } })
+					.sort({ uwid: 1, pcount: 1 })
+					.toArray()
+			: [];
+		const passivesByWeapon = new Map();
+		for (const passive of passiveRows) {
+			if (!passivesByWeapon.has(passive.uwid)) passivesByWeapon.set(passive.uwid, []);
+			passivesByWeapon.get(passive.uwid).push(passive.wpid);
+		}
+
 		let formattedWeapons = {};
-		for (let i in existingWeapons) {
-			const weapon = existingWeapons[i];
-			if (!formattedWeapons[weapon.wid]) {
-				formattedWeapons[weapon.wid] = [];
-			}
-			formattedWeapons[weapon.wid].push(weapon.wpid.join(','));
+		for (const weapon of weaponRows) {
+			if (!formattedWeapons[weapon.wid]) formattedWeapons[weapon.wid] = [];
+			formattedWeapons[weapon.wid].push((passivesByWeapon.get(weapon.uwid) || []).join(','));
 		}
 
 		const allWeapons = getAllWeapons();
-
-		addMissingWeapons.bind(this)(formattedWeapons, allWeapons, stat);
+		await addMissingWeapons.bind(this)(formattedWeapons, allWeapons, stat, id);
 	},
 });
 
@@ -78,9 +73,7 @@ function getAllWeapons() {
 
 function getAllPassives(count, passives) {
 	let result = [];
-	if (count <= 0) {
-		return result;
-	}
+	if (count <= 0) return result;
 	const prev = getAllPassives(count - 1, passives);
 	passives.forEach((passive) => {
 		if (prev.length) {
@@ -91,22 +84,22 @@ function getAllPassives(count, passives) {
 			result.push(passive);
 		}
 	});
-
 	return result;
 }
 
-async function addMissingWeapons(existingWeapons, allWeapons, stat) {
+async function addMissingWeapons(existingWeapons, allWeapons, stat, id) {
 	for (let allWid in allWeapons) {
 		let allPassives = allWeapons[allWid];
 		if (allPassives.length === 0) {
 			if (!existingWeapons[allWid]) {
-				await addWeapon.bind(this)(allWid, [], stat);
+				await addWeapon.bind(this)(allWid, [], stat, id);
 			}
 		} else {
 			let existingPassives =
 				existingWeapons[allWid]?.map((passives) => {
 					return passives
 						.split(',')
+						.filter(Boolean)
 						.sort((a, b) => parseInt(a) - parseInt(b))
 						.join(',');
 				}) || [];
@@ -116,24 +109,21 @@ async function addMissingWeapons(existingWeapons, allWeapons, stat) {
 					.sort((a, b) => parseInt(a) - parseInt(b))
 					.join(',');
 				if (!existingPassives.includes(allPassive)) {
-					let passives = allPassive.split(',');
-					passives = passives.map((passive) => {
-						return parseInt(passive);
-					});
-					await addWeapon.bind(this)(allWid, passives, stat);
+					let passives = allPassive.split(',').map((passive) => parseInt(passive));
+					await addWeapon.bind(this)(allWid, passives, stat, id);
 				}
 			}
 		}
 	}
 }
 
-async function addWeapon(wid, passives, stat) {
+async function addWeapon(wid, passives, stat, id) {
 	console.log(`Adding weapon ${wid}: ${passives}`);
 	const weapon = new WeaponInterface.weapons[wid](null, null, null, {
 		passives,
 		statOverride: stat,
 	});
-	await weapon.save(this.msg.author.id);
+	await weapon.save(id);
 	await delay(500);
 }
 

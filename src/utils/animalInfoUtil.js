@@ -6,7 +6,6 @@
  */
 
 let animalJson = require('../data/animal.json');
-const mysql = require('./../botHandlers/mysqlHandler.js');
 let bot;
 
 class AnimalJson {
@@ -20,47 +19,56 @@ class AnimalJson {
 		this.getRank = this.getRank.bind(this);
 		this.getRanks = this.getRanks.bind(this);
 		this.getOrder = this.getOrder.bind(this);
+		this.ready = null;
 	}
 
 	setBot(bot_) {
 		bot = bot_;
+		if (!this.ready) this.ready = this.initialize();
+		return this.ready;
 	}
 
 	async initialize() {
-		if (!bot) {
-			return new Promise((res) => {
-				setTimeout(() => {
-					res(this.initialize());
-				}, 5000);
-			});
-		}
-		this.animalNameToKey = {};
-		this.animals = {};
-		this.order = [];
-		this.ranks = {};
-		this.rankNameToKey = {};
+		if (!bot) throw new Error('Animal catalog cannot initialize before the bot is configured');
 
-		let result;
+		const collection = await bot.mongo.collection('animals');
+		const result = await collection.find({}).toArray();
+		if (!result.length) {
+			throw new Error(
+				'MongoDB animal catalog is empty. Import/seed the animals collection before starting the bot.'
+			);
+		}
+
+		const animalNameToKey = {};
+		const parsedAnimals = {};
+		const parsedRanks = {};
+		const rankNameToKey = {};
+		const previous = {
+			animalNameToKey: this.animalNameToKey,
+			animals: this.animals,
+			ranks: this.ranks,
+			rankNameToKey: this.rankNameToKey,
+		};
+
+		// Parse into temporary maps so commands never observe a half-reinitialized catalog.
+		this.animalNameToKey = animalNameToKey;
+		this.animals = parsedAnimals;
+		this.ranks = parsedRanks;
+		this.rankNameToKey = rankNameToKey;
 		try {
-			result = await mysql.query(`SELECT * FROM animals;`);
-		} catch (err) {
-			console.error(err);
-			console.error('Failed to fetch animals, retrying in 10s');
-			return new Promise((res) => {
-				setTimeout(() => {
-					res(this.initialize());
-				}, 5000);
+			result.forEach(this.parseAnimal);
+			Object.keys(animalJson.ranks).forEach(this.parseRank);
+			this.updateAnimalsAndRanks();
+			this.order = Object.keys(animalJson.ranks).sort((a, b) => {
+				return animalJson.ranks[a].order - animalJson.ranks[b].order;
 			});
+		} catch (err) {
+			this.animalNameToKey = previous.animalNameToKey;
+			this.animals = previous.animals;
+			this.ranks = previous.ranks;
+			this.rankNameToKey = previous.rankNameToKey;
+			throw err;
 		}
-
-		result.forEach(this.parseAnimal);
-		Object.keys(animalJson.ranks).forEach(this.parseRank);
-		this.updateAnimalsAndRanks();
-
-		this.order = Object.keys(animalJson.ranks);
-		this.order = this.order.sort((a, b) => {
-			return animalJson.ranks[a].order - animalJson.ranks[b].order;
-		});
 	}
 
 	async reinitialize(animalName) {
@@ -75,31 +83,26 @@ class AnimalJson {
 
 	deleteAnimal(animalName) {
 		const animalId = this.animalNameToKey[animalName.toLowerCase()];
-		if (!animalId) {
-			return;
-		}
+		if (!animalId) return;
 		const animal = this.animals[animalId];
-		if (!animal) {
-			return;
-		}
+		if (!animal) return;
 		delete this.animals[animalId];
 		animal.alt.forEach((alt) => {
 			alt = alt.toLowerCase();
-			if (this.animalNameToKey[alt] === animalId) {
-				delete this.animalNameToKey[alt];
-			}
+			if (this.animalNameToKey[alt] === animalId) delete this.animalNameToKey[alt];
 		});
 		if (this.animalNameToKey[animalId.toLowerCase()] === animalId) {
 			delete this.animalNameToKey[animalId.toLowerCase()];
 		}
-
 		const rank = this.ranks[animal.rank];
 		rank.deleteAnimal(animal);
 	}
 
 	async reinitializeAnimal(animalName) {
-		const result = await mysql.query(`SELECT * FROM animals WHERE name = ?`, animalName);
-		this.parseAnimal(result[0]);
+		const collection = await bot.mongo.collection('animals');
+		const result = await collection.findOne({ name: animalName });
+		if (!result) return;
+		this.parseAnimal(result);
 		this.updateAnimalsAndRanks();
 	}
 
@@ -111,18 +114,14 @@ class AnimalJson {
 		this.rankNameToKey = newAnimalJson.rankNameToKey;
 	}
 
-	/**
-	 * Parse animal for db
-	 */
+	/** Parse animal information from the database. */
 	parseAnimal(rawAnimal) {
 		const animal = new Animal(rawAnimal);
 		this.addAnimalKeyMap(animal);
 		this.animals[animal.value] = animal;
 	}
 
-	/**
-	 * Parse rank information
-	 */
+	/** Parse rank information. */
 	parseRank(rankName) {
 		const rank = new AnimalRank(rankName);
 		this.addRankKeyMap(rank);
@@ -133,41 +132,30 @@ class AnimalJson {
 		for (let key in this.animals) {
 			const animal = this.animals[key];
 			const rank = this.getRank(animal.rank);
+			if (!rank) throw new Error(`Unknown animal rank '${animal.rank}' for ${animal.value}`);
 			rank.addAnimalToTemp(animal);
 		}
-		Object.values(this.ranks).forEach((rank) => {
-			rank.useTemp();
-		});
+		Object.values(this.ranks).forEach((rank) => rank.useTemp());
 	}
 
 	getRank(rankName) {
-		rankName = this.rankNameToKey[rankName?.toLowerCase()];
-		return this.ranks[rankName];
+		rankName = this.rankNameToKey?.[rankName?.toLowerCase()];
+		return this.ranks?.[rankName];
 	}
 
 	getOrder() {
-		return this.order;
+		return this.order || [];
 	}
 
 	getRanks() {
-		return this.ranks;
+		return this.ranks || {};
 	}
 
 	getAnimal(animalName) {
-		animalName = this.animalNameToKey[animalName?.toLowerCase()];
-		return this.animals[animalName];
+		animalName = this.animalNameToKey?.[animalName?.toLowerCase()];
+		return this.animals?.[animalName];
 	}
 
-	/**
-	 * Add animal to animalNameToKey map
-	 *
-	 * Ex:
-	 * [...
-	 *   "gsquid": "<a:gsquid:417968419984375808>",
-	 *   "squid": "<a:gsquid:417968419984375808>",
-	 *   "<a:gsquid:417968419984375808>": "<a:gsquid:417968419984375808>",
-	 * ...]
-	 */
 	addAnimalKeyMap(animal) {
 		animal.alt.forEach((value) => {
 			this.animalNameToKey[value.toLowerCase()] = animal.value;
@@ -175,15 +163,6 @@ class AnimalJson {
 		this.animalNameToKey[animal.value.toLowerCase()] = animal.value;
 	}
 
-	/**
-	 * Add rank to rankNameToKey map
-	 *
-	 * Ex:
-	 * [...
-	 *   "common": "common",
-	 *   "c": "common",
-	 * ...]
-	 */
 	addRankKeyMap(rank) {
 		rank.alias.forEach((value) => {
 			this.rankNameToKey[value.toLowerCase()] = rank.id;
@@ -201,9 +180,7 @@ class Animal {
 		this.value = rawAnimal.name;
 		this.emoji = rawAnimal.name;
 		const emojiInfo = bot.global.parseEmoji(rawAnimal.name);
-		if (emojiInfo?.name) {
-			this.alt.push(emojiInfo.name);
-		}
+		if (emojiInfo?.name) this.alt.push(emojiInfo.name);
 		this.name = emojiInfo?.name || alt[0];
 		this.hpr = this.hp = rawAnimal.hp;
 		this.attr = this.att = rawAnimal.att;
@@ -257,12 +234,8 @@ class AnimalRank {
 
 	deleteAnimal(animal) {
 		const index = this.animals.indexOf(animal.value);
-		if (index > -1) {
-			this.animals.splice(index, 1);
-		}
+		if (index > -1) this.animals.splice(index, 1);
 	}
 }
 
-const obj = new AnimalJson();
-obj.initialize();
-module.exports = obj;
+module.exports = new AnimalJson();

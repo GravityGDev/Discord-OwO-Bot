@@ -27,37 +27,60 @@ module.exports = new CommandInterface({
 	cooldown: 3000,
 
 	execute: async function (p) {
-		// Get and delete a proposal request
-		let sql = `SELECT * FROM propose WHERE sender = ${p.msg.author.id} OR receiver = ${p.msg.author.id}; 
-			DELETE FROM propose WHERE sender = ${p.msg.author.id} OR receiver = ${p.msg.author.id};`;
-		let result = await p.query(sql);
-
-		// If there is one...
-		if (result[0].length > 0 && result[1].affectedRows > 0) {
-			// Tell the user we have declined the marriage request
-			let user = result[0][0].sender;
-			let preposition = 'from';
-			if (user == p.msg.author.id) {
-				user = result[0][0].receiver;
-				preposition = 'to';
-			}
-			user = await p.fetch.getUser(user);
-			if (!user) {
-				p.replyMsg(declineEmoji, ', you have declined a marriage request!');
-			} else {
-				p.replyMsg(
-					declineEmoji,
-					', you have declined a marriage request ' + preposition + ' ' + user.username + '!'
-				);
-			}
-
-			// Give the ring back to the sender
-			let sender = result[0][0].sender;
-			let ringId = result[0][0].rid;
-			sql = `INSERT INTO user_ring (uid,rid,rcount) VALUES ((SELECT uid FROM user WHERE id = ${sender}),${ringId},1) ON DUPLICATE KEY UPDATE rcount = rcount + 1;`;
-			await p.query(sql);
-		} else {
+		const id = String(p.msg.author.id);
+		const proposals = await p.mongo.collection('propose');
+		const proposal = await proposals.findOne({
+			$or: [{ sender: id }, { receiver: id }],
+		});
+		if (!proposal) {
 			p.errorMsg(', you do not have any pending marriage proposals!', 3000);
+			return;
+		}
+
+		const senderUid = await p.global.getUid(proposal.sender);
+		const session = await p.mongo.startSession();
+		try {
+			session.startTransaction();
+			const removed = await proposals.deleteOne(
+				{ sender: proposal.sender, receiver: proposal.receiver, rid: proposal.rid },
+				{ session }
+			);
+			if (!removed.deletedCount) {
+				await session.abortTransaction();
+				p.errorMsg(', you do not have any pending marriage proposals!', 3000);
+				return;
+			}
+
+			const userRings = await p.mongo.collection('user_ring');
+			await userRings.updateOne(
+				{ uid: senderUid, rid: proposal.rid },
+				{ $inc: { rcount: 1 }, $setOnInsert: { uid: senderUid, rid: proposal.rid } },
+				{ upsert: true, session }
+			);
+			await session.commitTransaction();
+		} catch (err) {
+			if (session.inTransaction()) await session.abortTransaction();
+			console.error(err);
+			p.errorMsg(', failed to decline that proposal. Please try again later.', 3000);
+			return;
+		} finally {
+			await session.endSession();
+		}
+
+		let user = proposal.sender;
+		let preposition = 'from';
+		if (user == id) {
+			user = proposal.receiver;
+			preposition = 'to';
+		}
+		user = await p.fetch.getUser(String(user));
+		if (!user) {
+			p.replyMsg(declineEmoji, ', you have declined a marriage request!');
+		} else {
+			p.replyMsg(
+				declineEmoji,
+				', you have declined a marriage request ' + preposition + ' ' + user.username + '!'
+			);
 		}
 	},
 });

@@ -11,8 +11,8 @@ const alterhb = require('../patreon/alterHuntbot.js').alter;
 const autohuntutil = require('./autohuntutil.js');
 const animalUtil = require('./animalUtil.js');
 const global = require('../../../utils/global.js');
+const mongoNumeric = require('../../../utils/mongoNumeric.js');
 const letters = 'abcdefghijklmnopqrstuvwxyz';
-const botrank = `SELECT COUNT(id) AS rank FROM autohunt WHERE autohunt.total >= (SELECT autohunt.total FROM autohunt WHERE id = `;
 const logger = require('../../../utils/logger.js');
 const parse = require('parse-duration');
 const patreonUtil = require('../patreon/utils/patreonUtil.js');
@@ -38,20 +38,29 @@ module.exports = new CommandInterface({
 	six: 500,
 
 	execute: async function (p) {
-		let args = p.args,
-			con = p.con;
-		if (args.length == 0) await display(p, p.msg, con, p.send);
-		else await autohunt(p, p.msg, con, p.args, p.global, p.send);
+		if (p.args.length == 0) await display(p, p.msg);
+		else await autohunt(p, p.msg, p.args, p.global, p.send);
 	},
 });
 
-async function claim(p, msg, con, query, bot) {
-	let timer = parseInt(query.timer);
-	if (timer < query.huntmin) {
-		let time = query.huntmin - timer;
-		let min = time % 60;
-		let hour = Math.trunc(time / 60);
-		let percent = generatePercent(timer, query.huntmin, 25);
+function minutesSince(date) {
+	if (!date) return Number.POSITIVE_INFINITY;
+	return Math.floor((Date.now() - new Date(date).getTime()) / 60000);
+}
+
+async function getBotRank(p, row) {
+	if (!row) return autohuntutil.getTotalBots();
+	const collection = await p.mongo.collection('autohunt');
+	return collection.countDocuments({ total: { $gte: Number(row.total || 0) } });
+}
+
+async function claim(p, msg, query, bot) {
+	const timer = minutesSince(query.start);
+	if (timer < Number(query.huntmin || 0)) {
+		const time = Number(query.huntmin || 0) - timer;
+		const min = time % 60;
+		const hour = Math.trunc(time / 60);
+		const percent = generatePercent(timer, query.huntmin, 25);
 		return {
 			time: (hour > 0 ? hour + 'H ' : '') + min + 'M',
 			bar: percent.bar,
@@ -60,403 +69,357 @@ async function claim(p, msg, con, query, bot) {
 		};
 	}
 
-	let duration = query.huntmin / 60;
-	//Get Total essence
-	let totalGain = Math.floor(autohuntutil.getLvl(query.gain, 0, 'gain').stat * duration);
-
-	let sql =
-		'UPDATE autohunt SET huntmin = 0,huntcount=0,essence = essence +' +
-		totalGain +
-		',total = total + ' +
-		totalGain +
-		' WHERE id = ' +
-		msg.author.id +
-		' AND huntmin > 0;';
-	let result = await p.query(sql);
-
-	if (result.changedRows <= 0) {
-		return;
-	}
-
-	//Check if patreon
+	const duration = Number(query.huntmin || 0) / 60;
+	const totalGain = Math.floor(autohuntutil.getLvl(query.gain || 0, 0, 'gain').stat * duration);
+	const totalExp = Math.floor(autohuntutil.getLvl(query.exp || 0, 0, 'exp').stat * duration);
+	const radar = autohuntutil.getLvl(query.radar || 0, 0, 'radar');
 	const supporter = await patreonUtil.getSupporterRank(p, p.msg.author);
-	let patreon = supporter.benefitRank > 0;
-
-	//Get total exp
-	let totalExp = Math.floor(autohuntutil.getLvl(query.exp, 0, 'exp').stat * duration);
-	await teamUtil.giveXPToUserTeams(p, p.msg.author, totalExp);
-
-	//Get all animal
-	let radar = autohuntutil.getLvl(query.radar, 0, 'radar');
-	let { animals, animalSql } = await animalUtil.getMultipleAnimals(query.huntcount, p.msg.author, {
-		patreon: patreon,
+	const generated = await animalUtil.getMultipleAnimalsMongo(query.huntcount, p.msg.author, {
+		patreon: supporter.benefitRank > 0,
 		huntbot: radar.stat,
 	});
-	let digits = 0;
-	for (let key in animals) {
-		if (animals[key].count > digits) digits = animals[key].count;
-	}
-	digits = Math.trunc(Math.log10(digits) + 1);
-	let text =
-		'**' +
-		bot +
-		' |** `BEEP BOOP. I AM BACK WITH ' +
-		query.huntcount +
-		' ANIMALS,`\n**<:blank:427371936482328596> |** `' +
-		totalGain +
-		' ESSENCE, AND ' +
-		totalExp +
-		' EXPERIENCE`';
-	let tempText = [];
 
-	for (let animal in animals) {
-		let animalString = animal + p.global.toSmallNum(animals[animal].count, digits) + '  ';
+	const collection = await p.mongo.collection('autohunt');
+	const session = await p.mongo.startSession();
+	let claimed = false;
+	try {
+		await session.withTransaction(async () => {
+			claimed = false;
+			const changed = await collection.updateOne(
+				{
+					_id: query._id,
+					huntmin: query.huntmin,
+					huntcount: query.huntcount,
+					start: query.start,
+				},
+				{
+					$set: { huntmin: 0, huntcount: 0 },
+					$inc: { essence: totalGain, total: totalGain },
+				},
+				{ session }
+			);
+			if (!changed.modifiedCount) return;
+			await animalUtil.applyAnimalBatch(msg.author.id, generated.ordered, generated.typeCount, {
+				session,
+			});
+			claimed = true;
+		});
+	} catch (err) {
+		console.error(err);
+		return;
+	} finally {
+		await session.endSession();
+	}
+	if (!claimed) return;
+
+	await teamUtil.giveXPToUserTeams(p, p.msg.author, totalExp);
+
+	let biggest = 0;
+	for (const key in generated.animals) {
+		if (generated.animals[key].count > biggest) biggest = generated.animals[key].count;
+	}
+	const digits = Math.trunc(Math.log10(biggest || 1) + 1);
+	let text =
+		`**${bot} |** \`BEEP BOOP. I AM BACK WITH ${query.huntcount} ANIMALS,\`` +
+		`\n**<:blank:427371936482328596> |** \`${totalGain} ESSENCE, AND ${totalExp} EXPERIENCE\``;
+	const tempText = [];
+	for (const animal in generated.animals) {
+		const info = generated.animals[animal];
+		const animalString = animal + p.global.toSmallNum(info.count, digits) + '  ';
 		const order = p.animalUtil.getOrder();
-		let animalLoc = order.indexOf(animals[animal].rank);
+		const animalLoc = order.indexOf(info.rank);
 		if (animalLoc || animalLoc === 0) {
-			if (!tempText[animalLoc])
+			if (!tempText[animalLoc]) {
 				tempText[animalLoc] = ' \n' + p.animalUtil.getRank(order[animalLoc]).emoji + ' **|**';
+			}
 			tempText[animalLoc] += ' ' + animalString;
 		}
 	}
+	for (const row of tempText) if (row) text += row;
 
-	for (let i = 0; i < tempText.length; i++) if (tempText[i]) text += tempText[i];
-
-	result = await p.query(animalSql);
 	text = alterhb(msg.author.id, text, 'returned');
 	p.send(text);
-	for (let animal in animals) {
-		let tempAnimal = global.validAnimal(animal);
+	for (const animal in generated.animals) {
+		const tempAnimal = global.validAnimal(animal);
 		logger.incr(
 			'animal',
-			animals[animal].count,
+			generated.animals[animal].count,
 			{ rank: tempAnimal.rank, name: tempAnimal.name },
 			p.msg
 		);
-		logger.incr('zoo', tempAnimal.points * animals[animal].count, {}, p.msg);
+		logger.incr('zoo', tempAnimal.points * generated.animals[animal].count, {}, p.msg);
 	}
 	logger.incr('essence', totalGain, { type: 'huntbot' }, p.msg);
 }
 
-async function autohunt(p, msg, con, args, global, send) {
+async function autohunt(p, msg, args, globalUtil, send) {
 	let cowoncy;
 	let password;
 	let length;
-	if (global.isInt(args[0]) || parse(args[0], 'h')) {
+	if (globalUtil.isInt(args[0]) || parse(args[0], 'h')) {
 		cowoncy = parseInt(args[0]);
 		password = args[1];
 		length = parse(args[0], 'h');
-	} else if (global.isInt(args[1]) || parse(args[1], 'h')) {
+	} else if (globalUtil.isInt(args[1]) || parse(args[1], 'h')) {
 		cowoncy = parseInt(args[1]);
 		password = args[0];
 		length = parse(args[1], 'h');
 	}
-
 	if (password) password = password.toLowerCase();
 
 	if (!cowoncy && !length) {
 		send('**🚫 | ' + p.getName() + '**, Wrong syntax!', 3000);
 		return;
 	}
-
 	if (cowoncy <= 0 && !length) {
 		send('**🚫 | ' + p.getName() + '**, Invalid cowoncy amount!', 3000);
 		return;
 	}
-
 	if (length != null && length <= 0) {
 		send('**🚫 | ' + p.getName() + '**, Invalid duration!', 3000);
 		return;
 	}
 
-	let sql =
-		'SELECT *,TIMESTAMPDIFF(MINUTE,start,NOW()) AS timer,TIMESTAMPDIFF(MINUTE,passwordtime,NOW()) AS pwtime FROM autohunt WHERE id = ' +
-		msg.author.id +
-		';';
-	sql += 'SELECT * FROM cowoncy WHERE id = ' + msg.author.id + ';';
-	sql += botrank + msg.author.id + ');';
-	let result = await p.query(sql);
+	const collection = await p.mongo.collection('autohunt');
+	let row = await collection.findOne({ id: String(msg.author.id) });
+	let rank = await getBotRank(p, row);
+	let bot = autohuntutil.getBot({ rank });
 
-	//Get emoji
-	let bot = autohuntutil.getBot(result[2][0]);
-
-	//Check if still hunting
-	let hunting;
-	if (result[0][0] && result[0][0].huntmin != 0) {
-		hunting = await claim(p, msg, con, result[0][0], bot);
+	if (row && Number(row.huntmin || 0) !== 0) {
+		const hunting = await claim(p, msg, row, bot);
 		if (hunting) {
 			let text =
-				'**' +
-				bot +
-				' |** `BEEP BOOP. I AM STILL HUNTING. I WILL BE BACK IN ' +
-				hunting.time +
-				'`\n**<:blank:427371936482328596> |** `' +
-				hunting.percent +
-				'% DONE | ' +
-				hunting.count +
-				' ANIMALS CAPTURED`\n**<:blank:427371936482328596> |** ' +
-				hunting.bar;
+				`**${bot} |** \`BEEP BOOP. I AM STILL HUNTING. I WILL BE BACK IN ${hunting.time}\`` +
+				`\n**<:blank:427371936482328596> |** \`${hunting.percent}% DONE | ${hunting.count} ANIMALS CAPTURED\`` +
+				`\n**<:blank:427371936482328596> |** ${hunting.bar}`;
 			text = alterhb(msg.author.id, text, 'progress');
 			send(text);
 		}
 		return;
 	}
 
-	// convert duration to cowoncy
-	if (length) {
-		let efficiency = autohuntutil.getLvl(result[0][0].efficiency, 0, 'efficiency');
-		let cost = autohuntutil.getLvl(result[0][0].cost, 0, 'cost');
-		cowoncy = Math.floor(efficiency.stat * cost.stat * length);
-	}
+	const defaults = getTraitStats(row);
+	if (length) cowoncy = Math.floor(defaults.efficiency.stat * defaults.cost.stat * length);
 
-	//Check if enough cowoncy
-	if (!result[1][0] || result[1][0].money < cowoncy) {
+	const cowoncyCollection = await p.mongo.collection('cowoncy');
+	const moneyRow = await cowoncyCollection.findOne({ id: String(msg.author.id) });
+	if (!moneyRow || mongoNumeric.toBigInt(moneyRow.money || 0) < BigInt(cowoncy)) {
 		send('**🚫 | ' + p.getName() + "**, You don't have enough cowoncy!", 3000);
 		return;
 	}
 
-	//Check if password
-	//no pw set
-	if (
-		!result[0][0] ||
-		result[0][0].password == undefined ||
-		result[0][0].password == '' ||
-		result[0][0].pwtime >= 10
-	) {
+	const pwtime = minutesSince(row?.passwordtime);
+	if (!row || !row.password || pwtime >= 10) {
 		let rand = '';
 		for (let i = 0; i < 5; i++) rand += letters.charAt(Math.floor(Math.random() * letters.length));
-		sql =
-			'INSERT INTO autohunt (id,start,huntcount,huntmin,password,passwordtime) VALUES (' +
-			msg.author.id +
-			",NOW(),0,0,'" +
-			rand +
-			"',NOW()) ON DUPLICATE KEY UPDATE password = '" +
-			rand +
-			"',passwordtime = NOW();";
-
-		result = await p.query(sql);
+		await collection.updateOne(
+			{ id: String(msg.author.id) },
+			{
+				$set: { password: rand, passwordtime: new Date() },
+				$setOnInsert: defaultHuntbot(msg.author.id),
+			},
+			{ upsert: true }
+		);
 		let text =
-			'**' +
-			bot +
-			' | ' +
-			p.getName() +
-			'**, Here is your password!\n**<:blank:427371936482328596> |** Use the command `owo autohunt ' +
-			cowoncy +
-			' {password}`';
+			`**${bot} | ${p.getName()}**, Here is your password!` +
+			`\n**<:blank:427371936482328596> |** Use the command \`owo autohunt ${cowoncy} {password}\``;
 		text = alterhb(msg.author.id, text, 'password');
 		autohuntutil.captcha(p, rand, text);
 		return;
 	}
-	//pw is set and wrong
-	if (result[0][0].password != password) {
-		if (!password)
+
+	if (row.password != password) {
+		const remaining = Math.max(0, 10 - pwtime);
+		if (!password) {
 			send(
-				'**🚫 | ' +
-					p.getName() +
-					'**, Please include your password! The command is `owo autohunt ' +
-					cowoncy +
-					' {password}`!\n**<:blank:427371936482328596> |** Password will reset in ' +
-					(10 - result[0][0].pwtime) +
-					' minutes'
+				`**🚫 | ${p.getName()}**, Please include your password! The command is \`owo autohunt ${cowoncy} {password}\`!` +
+					`\n**<:blank:427371936482328596> |** Password will reset in ${remaining} minutes`
 			);
-		else
+		} else {
 			send(
-				'**🚫 | ' +
-					p.getName() +
-					'**, Wrong password! The command is `owo autohunt ' +
-					cowoncy +
-					' {password}`!\n**<:blank:427371936482328596> |** Password will reset in ' +
-					(10 - result[0][0].pwtime) +
-					' minutes'
+				`**🚫 | ${p.getName()}**, Wrong password! The command is \`owo autohunt ${cowoncy} {password}\`!` +
+					`\n**<:blank:427371936482328596> |** Password will reset in ${remaining} minutes`
 			);
+		}
 		return;
 	}
 
-	//Extract info
-	let duration, efficiency, cost, gain, exp;
-	if (result[0][0]) {
-		duration = autohuntutil.getLvl(result[0][0].duration, 0, 'duration');
-		efficiency = autohuntutil.getLvl(result[0][0].efficiency, 0, 'efficiency');
-		cost = autohuntutil.getLvl(result[0][0].cost, 0, 'cost');
-		gain = autohuntutil.getLvl(result[0][0].gain, 0, 'gain');
-		exp = autohuntutil.getLvl(result[0][0].exp, 0, 'exp');
-	} else {
-		duration = autohuntutil.getLvl(0, 0, 'duration');
-		efficiency = autohuntutil.getLvl(0, 0, 'efficiency');
-		cost = autohuntutil.getLvl(0, 0, 'cost');
-		gain = autohuntutil.getLvl(0, 0, 'gain');
-		exp = autohuntutil.getLvl(0, 0, 'exp');
+	const stats = getTraitStats(row);
+	const maxhunt = Math.floor(stats.duration.stat * stats.efficiency.stat);
+	const maxgain = Math.floor(stats.gain.stat * stats.duration.stat);
+	const maxexp = Math.floor(stats.exp.stat * stats.duration.stat);
+	cowoncy -= cowoncy % stats.cost.stat;
+	if (cowoncy > maxhunt * stats.cost.stat) cowoncy = maxhunt * stats.cost.stat;
+	if (cowoncy <= 0) {
+		send('**🚫 | ' + p.getName() + '**, Invalid cowoncy amount!', 3000);
+		return;
 	}
-	let maxhunt = Math.floor(duration.stat * efficiency.stat);
-	let maxgain = Math.floor(gain.stat * duration.stat);
-	let maxexp = Math.floor(exp.stat * duration.stat);
 
-	//Format cowoncy
-	cowoncy -= cowoncy % cost.stat;
-	if (cowoncy > maxhunt * cost.stat) cowoncy = maxhunt * cost.stat;
+	const huntcount = Math.trunc(cowoncy / stats.cost.stat);
+	const huntmin = Math.ceil((huntcount / stats.efficiency.stat) * 60);
+	const tempPercent = huntmin / (stats.duration.stat * 60);
+	const huntgain = Math.floor(tempPercent * maxgain);
+	const huntexp = Math.floor(tempPercent * maxexp);
+	const start = await startHunt(p, row, password, cowoncy, huntcount, huntmin);
+	if (!start.ok) {
+		if (start.reason === 'money') {
+			send('**🚫 | ' + p.getName() + "**, You don't have enough cowoncy!", 3000);
+		} else if (start.reason === 'active') {
+			send('**🚫 | ' + p.getName() + '**, your HuntBot is already hunting!', 3000);
+		} else {
+			send('**🚫 | ' + p.getName() + '**, HuntBot state changed. Please try again!', 3000);
+		}
+		return;
+	}
 
-	let huntcount = Math.trunc(cowoncy / cost.stat);
-	let huntmin = Math.ceil((huntcount / efficiency.stat) * 60);
-	let tempPercent = huntmin / (duration.stat * 60);
-	let huntgain = Math.floor(tempPercent * maxgain);
-	let huntexp = Math.floor(tempPercent * maxexp);
-
-	sql = 'UPDATE cowoncy SET money = money - ' + cowoncy + ' WHERE id = ' + msg.author.id + ';';
-	sql +=
-		'INSERT INTO autohunt (id,start,huntcount,huntmin,password) VALUES (' +
-		msg.author.id +
-		',NOW(),' +
-		huntcount +
-		',' +
-		huntmin +
-		",'') ON DUPLICATE KEY UPDATE start = NOW(), huntcount = " +
-		huntcount +
-		',huntmin = ' +
-		huntmin +
-		",password = '';";
-	result = await p.query(sql);
-	logger.decr('cowoncy', -1 * cowoncy, { type: 'huntbot' }, p.msg);
-	let min = huntmin % 60;
-	let hour = Math.trunc(huntmin / 60);
-	let timer = '';
-	if (hour > 0) timer = hour + 'H' + min + 'M';
-	else timer = min + 'M';
+	logger.decr('cowoncy', -cowoncy, { type: 'huntbot' }, p.msg);
+	const min = huntmin % 60;
+	const hour = Math.trunc(huntmin / 60);
+	const timer = hour > 0 ? hour + 'H' + min + 'M' : min + 'M';
 	let text =
-		'**' +
-		bot +
-		' |** `BEEP BOOP. `**`' +
-		p.getName() +
-		'`**`, YOU SPENT ' +
-		global.toFancyNum(cowoncy) +
-		' cowoncy`\n**<:blank:427371936482328596> |** `I WILL BE BACK IN ' +
-		timer +
-		' WITH ' +
-		huntcount +
-		' ANIMALS,`\n**<:blank:427371936482328596> |** `' +
-		huntgain +
-		' ESSENCE, AND ' +
-		huntexp +
-		' EXPERIENCE`';
+		`**${bot} |** \`BEEP BOOP. \`**\`${p.getName()}\`**\`, YOU SPENT ${globalUtil.toFancyNum(cowoncy)} cowoncy\`` +
+		`\n**<:blank:427371936482328596> |** \`I WILL BE BACK IN ${timer} WITH ${huntcount} ANIMALS,\`` +
+		`\n**<:blank:427371936482328596> |** \`${huntgain} ESSENCE, AND ${huntexp} EXPERIENCE\``;
 	text = alterhb(msg.author.id, text, 'spent');
 	send(text);
 }
 
-async function display(p, msg, con) {
-	let sql =
-		'SELECT *,TIMESTAMPDIFF(MINUTE,start,NOW()) AS timer FROM autohunt WHERE id = ' +
-		msg.author.id +
-		';';
-	sql += botrank + msg.author.id + ');';
-	let result = await p.query(sql);
+async function startHunt(p, row, password, cowoncy, huntcount, huntmin) {
+	const bots = await p.mongo.collection('autohunt');
+	const money = await p.mongo.collection('cowoncy');
+	const session = await p.mongo.startSession();
+	let outcome = { ok: false };
+	try {
+		await session.withTransaction(async () => {
+			outcome = { ok: false };
+			const current = await bots.findOne({ id: String(p.msg.author.id) }, { session });
+			if (!current || current.password !== password) {
+				outcome = { ok: false, reason: 'password' };
+				return;
+			}
+			if (Number(current.huntmin || 0) !== 0) {
+				outcome = { ok: false, reason: 'active' };
+				return;
+			}
+			const debit = await mongoNumeric.subtractIfEnough(
+				money,
+				{ id: String(p.msg.author.id) },
+				'money',
+				cowoncy,
+				{ session }
+			);
+			if (!debit.modifiedCount) {
+				outcome = { ok: false, reason: 'money' };
+				return;
+			}
+			const changed = await bots.updateOne(
+				{ _id: current._id, huntmin: current.huntmin, password: current.password },
+				{
+					$set: {
+						start: new Date(),
+						huntcount,
+						huntmin,
+						password: '',
+					},
+				},
+				{ session }
+			);
+			if (!changed.modifiedCount) throw new Error('HuntBot state changed while starting hunt');
+			outcome = { ok: true };
+		});
+	} catch (err) {
+		console.error(err);
+		return { ok: false, reason: 'error' };
+	} finally {
+		await session.endSession();
+	}
+	return outcome;
+}
 
-	//Get emoji
-	let bot = autohuntutil.getBot(result[1][0]);
-	let rank = result[1][0]?.rank || autohuntutil.getTotalBots();
+async function display(p, msg) {
+	const collection = await p.mongo.collection('autohunt');
+	const row = await collection.findOne({ id: String(msg.author.id) });
+	const rank = await getBotRank(p, row);
+	const bot = autohuntutil.getBot({ rank });
 
 	let hunting;
-	if (result[0][0] && result[0][0].huntmin != 0) {
-		hunting = await claim(p, msg, con, result[0][0], bot);
+	if (row && Number(row.huntmin || 0) !== 0) {
+		hunting = await claim(p, msg, row, bot);
 		if (!hunting) return;
 	}
-	let duration, efficiency, cost, essence, maxhunt, gain, exp, radar;
-	if (result[0][0]) {
-		duration = autohuntutil.getLvl(result[0][0].duration, 0, 'duration');
-		efficiency = autohuntutil.getLvl(result[0][0].efficiency, 0, 'efficiency');
-		cost = autohuntutil.getLvl(result[0][0].cost, 0, 'cost');
-		gain = autohuntutil.getLvl(result[0][0].gain, 0, 'gain');
-		exp = autohuntutil.getLvl(result[0][0].exp, 0, 'exp');
-		radar = autohuntutil.getLvl(result[0][0].radar, 0, 'radar');
-		essence = result[0][0].essence;
-	} else {
-		duration = autohuntutil.getLvl(0, 0, 'duration');
-		efficiency = autohuntutil.getLvl(0, 0, 'efficiency');
-		cost = autohuntutil.getLvl(0, 0, 'cost');
-		gain = autohuntutil.getLvl(0, 0, 'gain');
-		exp = autohuntutil.getLvl(0, 0, 'exp');
-		radar = autohuntutil.getLvl(0, 0, 'radar');
-		essence = 0;
+
+	const stats = getTraitStats(row);
+	const traits = [
+		stats.duration,
+		stats.efficiency,
+		stats.cost,
+		stats.gain,
+		stats.exp,
+		stats.radar,
+	];
+	for (const trait of traits) {
+		trait.percent = generatePercent(trait.currentxp, trait.maxxp).bar;
+		if (trait.max) trait.value = '`Lvl ' + trait.lvl + ' [MAX]`\n' + generatePercent(1, 1).bar;
+		else trait.value = `\`Lvl ${trait.lvl} [${trait.currentxp}/${trait.maxxp}]\`\n${trait.percent}`;
 	}
 
-	let traits = [duration, efficiency, cost, gain, exp, radar];
-	for (let i = 0; i < traits.length; i++) {
-		traits[i].percent = generatePercent(traits[i].currentxp, traits[i].maxxp).bar;
-		if (traits[i].max)
-			traits[i].value = '`Lvl ' + traits[i].lvl + ' [MAX]`\n' + generatePercent(1, 1).bar;
-		else
-			traits[i].value =
-				'`Lvl ' +
-				traits[i].lvl +
-				' [' +
-				traits[i].currentxp +
-				'/' +
-				traits[i].maxxp +
-				']`\n' +
-				traits[i].percent;
-	}
-
-	maxhunt = Math.floor(duration.stat * efficiency.stat);
+	const maxhunt = Math.floor(stats.duration.stat * stats.efficiency.stat);
 	let embed = {
 		color: p.config.embed_color,
 		author: {
 			name: p.getName() + "'s HuntBot",
 			icon_url: msg.author.avatarURL,
 		},
-		thumbnail: {
-			url: p.global.getEmojiURL(bot),
-		},
+		thumbnail: { url: p.global.getEmojiURL(bot) },
 		footer: {
 			text: `Rank #${p.global.toFancyNum(rank)} • ${p.getUniqueName(msg.author)}`,
 		},
 		fields: [
 			{
-				name: `\`BEEP. BOOP. I AM HUNTBOT. I WILL HUNT FOR YOU MASTER.\``,
+				name: '`BEEP. BOOP. I AM HUNTBOT. I WILL HUNT FOR YOU MASTER.`',
 				value:
 					'Use the command `owo autohunt {cowoncy}` to get started.\nYou can use `owo upgrade {trait} {count}` to upgrade the traits below.\nTo obtain more essence, use `owo sacrifice {animal} {count}`.\n\n',
 				inline: false,
 			},
 			{
-				name: '⏱ Efficiency - `' + efficiency.stat + efficiency.prefix + '`',
-				value: efficiency.value,
+				name: `⏱ Efficiency - \`${stats.efficiency.stat + stats.efficiency.prefix}\``,
+				value: stats.efficiency.value,
 				inline: true,
 			},
 			{
-				name: '⏳ Duration - `' + duration.stat + duration.prefix + '`',
-				value: duration.value,
+				name: `⏳ Duration - \`${stats.duration.stat + stats.duration.prefix}\``,
+				value: stats.duration.value,
 				inline: true,
 			},
 			{
-				name: '<:cowoncy:416043450337853441> Cost - `' + cost.stat + cost.prefix + '`',
-				value: cost.value,
+				name: `<:cowoncy:416043450337853441> Cost - \`${stats.cost.stat + stats.cost.prefix}\``,
+				value: stats.cost.value,
 				inline: true,
 			},
 			{
-				name: '🔧 Gain - `' + gain.stat + gain.prefix + '`',
-				value: gain.value,
+				name: `🔧 Gain - \`${stats.gain.stat + stats.gain.prefix}\``,
+				value: stats.gain.value,
 				inline: true,
 			},
 			{
-				name: '⚔ Experience - `' + exp.stat + exp.prefix + '`',
-				value: exp.value,
+				name: `⚔ Experience - \`${stats.exp.stat + stats.exp.prefix}\``,
+				value: stats.exp.value,
 				inline: true,
 			},
 			{
-				name: '📡 Radar - `' + radar.stat + radar.prefix + '`',
-				value: radar.value,
+				name: `📡 Radar - \`${stats.radar.stat + stats.radar.prefix}\``,
+				value: stats.radar.value,
 				inline: true,
 			},
 			{
-				name:
-					'<a:essence:451638978299428875> Animal Essence - `' + global.toFancyNum(essence) + '`',
+				name: `<a:essence:451638978299428875> Animal Essence - \`${global.toFancyNum(
+					Number(row?.essence || 0)
+				)}\``,
 				value:
-					'`Current Max Autohunt: ' +
-					global.toFancyNum(maxhunt) +
-					' animals, ' +
-					global.toFancyNum(Math.floor(gain.stat * duration.stat)) +
-					' essence, and ' +
-					global.toFancyNum(Math.floor(exp.stat * duration.stat)) +
-					' xp for ' +
-					global.toFancyNum(maxhunt * cost.stat) +
-					' cowoncy`',
+					`\`Current Max Autohunt: ${global.toFancyNum(maxhunt)} animals, ` +
+					`${global.toFancyNum(Math.floor(stats.gain.stat * stats.duration.stat))} essence, and ` +
+					`${global.toFancyNum(Math.floor(stats.exp.stat * stats.duration.stat))} xp for ` +
+					`${global.toFancyNum(maxhunt * stats.cost.stat)} cowoncy\``,
 				inline: false,
 			},
 		],
@@ -465,18 +428,41 @@ async function display(p, msg, con) {
 		embed.fields.push({
 			name: bot + ' HUNTBOT is currently hunting!',
 			value:
-				'`BEEP BOOP. I AM STILL HUNTING. I WILL BE BACK IN ' +
-				hunting.time +
-				'`\n`' +
-				hunting.percent +
-				'% DONE | ' +
-				hunting.count +
-				' ANIMALS CAPTURED`\n' +
-				hunting.bar,
+				`\`BEEP BOOP. I AM STILL HUNTING. I WILL BE BACK IN ${hunting.time}\`` +
+				`\n\`${hunting.percent}% DONE | ${hunting.count} ANIMALS CAPTURED\`` +
+				`\n${hunting.bar}`,
 		});
 	}
 	embed = alterhb(msg.author.id, embed, 'hb');
 	p.send({ embed });
+}
+
+function getTraitStats(row) {
+	return {
+		duration: autohuntutil.getLvl(Number(row?.duration || 0), 0, 'duration'),
+		efficiency: autohuntutil.getLvl(Number(row?.efficiency || 0), 0, 'efficiency'),
+		cost: autohuntutil.getLvl(Number(row?.cost || 0), 0, 'cost'),
+		gain: autohuntutil.getLvl(Number(row?.gain || 0), 0, 'gain'),
+		exp: autohuntutil.getLvl(Number(row?.exp || 0), 0, 'exp'),
+		radar: autohuntutil.getLvl(Number(row?.radar || 0), 0, 'radar'),
+	};
+}
+
+function defaultHuntbot(id) {
+	return {
+		id: String(id),
+		start: new Date(0),
+		huntcount: 0,
+		huntmin: 0,
+		essence: 0,
+		total: 0,
+		efficiency: 0,
+		duration: 0,
+		cost: 0,
+		gain: 0,
+		exp: 0,
+		radar: 0,
+	};
 }
 
 function generatePercent(current, max, length) {

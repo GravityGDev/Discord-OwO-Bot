@@ -6,16 +6,14 @@
  */
 
 const CommandInterface = require('../../CommandInterface.js');
-
-/*
- * Quest command.
- * Users can claim 1 quest a day up to 3 quests in total
- */
-
 const dateUtil = require('../../../utils/dateUtil.js');
 const global = require('../../../utils/global.js');
 const questJson = require('../../../data/quests.json');
 
+/*
+ * Quest command.
+ * Users can claim 1 quest a day up to 3 quests in total.
+ */
 module.exports = new CommandInterface({
 	alias: ['quest', 'q'],
 
@@ -40,178 +38,158 @@ module.exports = new CommandInterface({
 			p.args.length == 2 &&
 			(p.args[0] == 'rr' || p.args[0] == 'reroll') &&
 			p.global.isInt(p.args[1])
-		)
+		) {
 			await rrQuest(p);
-		else if (
+		} else if (
 			p.args.length == 2 &&
 			(p.args[0] == 'lock' || p.args[0] == 'unlock') &&
 			p.global.isInt(p.args[1])
-		)
+		) {
 			await lockUnlockQuest(p);
-		else await addQuest(p);
+		} else {
+			await addQuest(p);
+		}
 	},
 });
 
 async function rrQuest(p) {
-	/* Parse which quest to alter */
-	let qnum = parseInt(p.args[1]) - 1;
+	const position = parseInt(p.args[1]) - 1;
+	const uid = await p.global.getUid(p.msg.author.id);
+	const timers = await p.mongo.collection('timers');
+	const questCollection = await p.mongo.collection('quest');
+	const session = await p.mongo.startSession();
+	let failure;
 
-	/* Query timer info */
-	let sql =
-		'SELECT questrrTime FROM timers WHERE uid = (SELECT uid FROM user WHERE id = ' +
-		p.msg.author.id +
-		');';
-	sql +=
-		'SELECT qid, locked FROM user INNER JOIN quest ON user.uid = quest.uid WHERE id = ' +
-		p.msg.author.id +
-		' ORDER BY qid ASC;';
-	let result = await p.query(sql);
+	try {
+		await session.withTransaction(async () => {
+			failure = undefined;
+			await timers.updateOne({ uid }, { $setOnInsert: { uid } }, { upsert: true, session });
+			const timer = await timers.findOne({ uid }, { session });
+			const afterMid = dateUtil.afterMidnight(timer?.questrrTime);
+			if (!afterMid || !afterMid.after) {
+				failure = ', you already rerolled a quest today silly head!';
+				return;
+			}
 
-	/* Parse dates */
-	let afterMid = dateUtil.afterMidnight(result[0][0] ? result[0][0].questrrTime : undefined);
+			const quests = await questCollection.find({ uid }, { session }).sort({ qid: 1 }).toArray();
+			const selected = quests[position];
+			if (!selected) {
+				failure = ', Could not locate the quest.';
+				return;
+			}
 
-	/* After midnight? */
-	if (!afterMid || !afterMid.after) {
-		p.errorMsg(', you already rerolled a quest today silly head!', 3000);
+			const replacement = createQuest(uid, selected.qid, Number(selected.locked || 0));
+			const changed = await questCollection.updateOne(
+				{ uid, qid: selected.qid },
+				{
+					$set: {
+						qname: replacement.qname,
+						level: replacement.level,
+						prize: replacement.prize,
+						count: 0,
+						locked: replacement.locked,
+					},
+				},
+				{ session }
+			);
+			if (!changed.matchedCount) {
+				failure = ', Could not locate the quest.';
+				return;
+			}
+
+			await timers.updateOne({ uid }, { $set: { questrrTime: afterMid.now } }, { session });
+		});
+	} catch (err) {
+		console.error(err);
+		p.errorMsg(', there was an error rerolling your quest. Please try again later.', 3000);
+		return;
+	} finally {
+		await session.endSession();
+	}
+
+	if (failure) {
+		p.errorMsg(failure, 3000);
 		return;
 	}
 
-	/* Is there even a quest to reroll? */
-	let valid = false;
-	let locked = false;
-	for (let i in result[1]) {
-		if (!valid && i == qnum) {
-			valid = true;
-			qnum = result[1][i].qid;
-			locked = result[1][i].locked;
-		}
-	}
-	if (!valid) {
-		p.errorMsg(', Could not locate the quest.', 3000);
-		return;
-	}
-
-	/* alright, we can now find a new quest! */
-	let quest = getQuest(p.msg.author.id, { qnum }, undefined, locked);
-
-	/* Replace the quest in query */
-	sql =
-		'DELETE FROM quest WHERE uid = (SELECT uid FROM user WHERE id = ' +
-		p.msg.author.id +
-		') AND qid = ' +
-		qnum +
-		';';
-	sql += quest.sql;
-	sql +=
-		'UPDATE timers LEFT JOIN user ON timers.uid = user.uid SET questrrTime = ' +
-		afterMid.sql +
-		' WHERE id = ' +
-		p.msg.author.id +
-		';';
-	sql +=
-		'SELECT * FROM quest WHERE uid = (SELECT uid FROM user WHERE id = ' +
-		p.msg.author.id +
-		') ORDER BY qid asc;';
-	result = await p.query(sql);
 	p.cache.clearQuests(p.msg.author.id);
-
-	/* Display the result */
-	let quests = parseQuests(p.msg.author.id, result[3], afterMid);
-	let embed = constructEmbed(p, afterMid, quests);
-
-	p.send({ embed });
+	await displayCurrentQuests(p, uid, 'questrrTime');
 }
 
 async function lockUnlockQuest(p) {
-	/* Parse which quest to alter */
-	let qnum = parseInt(p.args[1]) - 1;
-
-	let sql = `SELECT qid FROM user INNER JOIN quest ON user.uid = quest.uid WHERE id = ${p.msg.author.id} ORDER BY qid ASC;`;
-	let result = await p.query(sql);
-
-	/* Is there even a quest to lock? */
-	let valid = false;
-	for (let i in result) {
-		if (!valid && i == qnum) {
-			valid = true;
-			qnum = result[i].qid;
-		}
-	}
-	if (!valid) {
+	const position = parseInt(p.args[1]) - 1;
+	const uid = await p.global.getUid(p.msg.author.id);
+	const questCollection = await p.mongo.collection('quest');
+	const quests = await questCollection.find({ uid }).sort({ qid: 1 }).toArray();
+	const selected = quests[position];
+	if (!selected) {
 		p.errorMsg(', Could not locate the quest.', 3000);
 		return;
 	}
-	let lock = false;
-	if (p.args[0].toLowerCase() == 'lock') {
-		lock = true;
+
+	const locked = p.args[0].toLowerCase() == 'lock' ? 1 : 0;
+	const changed = await questCollection.updateOne(
+		{ uid, qid: selected.qid },
+		{ $set: { locked } }
+	);
+	if (!changed.matchedCount) {
+		p.errorMsg(', Could not locate the quest.', 3000);
+		return;
 	}
 
-	sql = `UPDATE quest SET locked = ${lock} WHERE uid = (SELECT uid FROM user WHERE id = ${p.msg.author.id}) AND qid = ${qnum};`;
-	sql += `SELECT * FROM quest WHERE uid = (SELECT uid FROM user WHERE id = ${p.msg.author.id}) ORDER BY qid asc;`;
-	sql += `SELECT questTime FROM timers WHERE uid = (SELECT uid FROM user WHERE id = ${p.msg.author.id});`;
-
-	result = await p.query(sql);
 	p.cache.clearQuests(p.msg.author.id);
-
-	/* Parse dates */
-	let afterMid = dateUtil.afterMidnight(result[2][0] ? result[2][0].questTime : undefined);
-
-	let quests = parseQuests(p.msg.author.id, result[1], afterMid);
-
-	/*Create embed */
-	let embed = constructEmbed(p, afterMid, quests);
-
-	p.send({ embed });
+	await displayCurrentQuests(p, uid, 'questTime');
 }
 
 async function addQuest(p) {
-	/* Query for user info */
-	let sql =
-		'SELECT questTime FROM timers WHERE uid = (SELECT uid FROM user WHERE id = ' +
-		p.msg.author.id +
-		');';
-	sql +=
-		'SELECT * FROM quest WHERE uid = (SELECT uid FROM user WHERE id = ' +
-		p.msg.author.id +
-		') ORDER BY qid asc;';
+	const uid = await p.global.getUid(p.msg.author.id);
+	const timers = await p.mongo.collection('timers');
+	const questCollection = await p.mongo.collection('quest');
+	const session = await p.mongo.startSession();
+	let added = false;
 
-	/* Query sql */
-	let result = await p.query(sql);
+	try {
+		await session.withTransaction(async () => {
+			added = false;
+			await timers.updateOne({ uid }, { $setOnInsert: { uid } }, { upsert: true, session });
+			const timer = await timers.findOne({ uid }, { session });
+			const afterMid = dateUtil.afterMidnight(timer?.questTime);
+			const current = await questCollection.find({ uid }, { session }).sort({ qid: 1 }).toArray();
 
-	/* If there is no timer data, make one */
-	if (!result[0][0]) {
-		sql = 'INSERT IGNORE INTO user (id,count) values (' + p.msg.author.id + ',0);';
-		sql +=
-			'INSERT INTO timers (uid) values ((SELECT uid FROM user WHERE id = ' +
-			p.msg.author.id +
-			'));';
-		await p.query(sql);
+			if (!afterMid?.after || current.length >= 3) return;
+
+			const next = createQuest(uid, 3, 0);
+			const normalized = current
+				.map(normalizeQuestDocument)
+				.concat(next)
+				.sort((a, b) => a.qid - b.qid)
+				.map((quest, index) => ({ ...quest, qid: index }));
+
+			await questCollection.deleteMany({ uid }, { session });
+			if (normalized.length) await questCollection.insertMany(normalized, { session });
+			await timers.updateOne({ uid }, { $set: { questTime: afterMid.now } }, { session });
+			added = true;
+		});
+	} catch (err) {
+		console.error(err);
+		p.errorMsg(', there was an error updating your quests. Please try again later.', 3000);
+		return;
+	} finally {
+		await session.endSession();
 	}
 
-	/* Parse dates */
-	let afterMid = dateUtil.afterMidnight(result[0][0] ? result[0][0].questTime : undefined);
+	if (added) p.cache.clearQuests(p.msg.author.id);
+	await displayCurrentQuests(p, uid, 'questTime');
+}
 
-	/* Check if its past midnight and number of quest < 3, if so add 1 quest */
-	let quest;
-	if (afterMid && afterMid.after && result[1].length < 3)
-		quest = getQuest(p.msg.author.id, undefined, afterMid.sql);
-
-	let quests = parseQuests(p.msg.author.id, result[1], afterMid, quest);
-
-	/* Combine sql statements */
-	sql = '';
-	if (quest) sql += quest.sql;
-	if (quests) sql += quests.sql;
-
-	if (sql != '') {
-		await p.query(sql);
-		p.cache.clearQuests(p.msg.author.id);
-	}
-
-	/*Create embed */
-	let embed = constructEmbed(p, afterMid, quests);
-
-	p.send({ embed });
+async function displayCurrentQuests(p, uid, timerField) {
+	const timers = await p.mongo.collection('timers');
+	const questCollection = await p.mongo.collection('quest');
+	const timer = await timers.findOne({ uid });
+	const quests = await questCollection.find({ uid }).sort({ qid: 1 }).toArray();
+	const afterMid = dateUtil.afterMidnight(timer?.[timerField]);
+	const embed = constructEmbed(p, afterMid, parseQuests(quests));
+	await p.send({ embed });
 }
 
 function constructEmbed(p, afterMid, quests) {
@@ -228,87 +206,70 @@ function constructEmbed(p, afterMid, quests) {
 	};
 }
 
-function getQuest(id, qid, afterMidSQL) {
-	/* Grab a random quest catagory */
+function createQuest(uid, qid, locked = 0) {
 	let key = Object.keys(questJson);
 	key = key[Math.floor(Math.random() * key.length)];
-	let quest = questJson[key];
+	const quest = questJson[key];
 
-	/* Grab random quest level */
 	let rand = Math.random();
-	let loc = 0;
+	let level = 0;
+	let chance = 0;
 	for (let i = 0; i < quest.chance.length; i++) {
-		loc += quest.chance[i];
-		if (rand <= loc) {
-			loc = i;
-			i = quest.chance.length;
+		chance += quest.chance[i];
+		if (rand <= chance) {
+			level = i;
+			break;
 		}
 	}
 
-	/* Grab prize type */
 	let prize = 'cowoncy';
 	rand = Math.random();
 	if (rand > 0.75) prize = 'crate';
 	else if (rand > 0.5) prize = 'lootbox';
 	else if (rand > 0.25) prize = 'shards';
 
-	/* Construct insert sql */
-	let sql = `INSERT IGNORE INTO quest (uid, qid, qname, level, prize, count, locked) values (
-			(SELECT uid FROM user WHERE id = ${id}),
-			${qid ? qid.qnum : 3},
-			'${key}',
-			${loc},
-			'${prize}',
-			0,
-			0	
-		);`;
-	/* Reset timer if its from daily quest */
-	if (!qid) {
-		sql += `INSERT INTO timers (uid,questTime) VALUES ((SELECT uid FROM user WHERE id = ${id}),${afterMidSQL}) ON DUPLICATE KEY UPDATE questTime = ${afterMidSQL};`;
-	}
-
-	return { sql, key, level: loc, prize };
+	return {
+		uid,
+		qid,
+		qname: key,
+		level,
+		prize,
+		count: 0,
+		locked: Number(locked || 0),
+	};
 }
 
-function parseQuests(id, result, afterMid, quest) {
-	/* Reorder qid to proper qid */
-	let sql = '';
-	if (quest) {
-		let order = [];
-		for (let i = 0; i < result.length; i++) {
-			order.push(result[i].qid);
-		}
-		order.push(3);
-		for (let i = 0; i < order.length; i++) {
-			sql += `UPDATE quest SET qid = ${i} WHERE qid = ${order[i]} AND uid = (SELECT uid FROM user WHERE id = ${id});`;
-		}
-		result.push({
-			qname: quest.key,
-			level: quest.level,
-			prize: quest.prize,
-			count: 0,
-		});
-	}
+function normalizeQuestDocument(quest) {
+	return {
+		uid: quest.uid,
+		qid: quest.qid,
+		qname: quest.qname,
+		level: quest.level,
+		prize: quest.prize,
+		count: Number(quest.count || 0),
+		locked: Number(quest.locked || 0),
+	};
+}
 
+function parseQuests(result) {
 	let text = '';
 	for (let i = 0; i < result.length; i++) {
 		const texts = parseQuest(result[i]);
 		text += `**${i + 1}. ${texts.text}**`;
 		text += `<:blank:427371936482328596>\`‣ Reward:\` ${texts.reward}`;
 		text += `\n<:blank:427371936482328596>\`‣ Progress: [${texts.progress}]\`\n`;
-		if (texts.locked) {
-			text += '<:blank:427371936482328596>`‣ 🔒 Locked`\n';
-		}
+		if (texts.locked) text += '<:blank:427371936482328596>`‣ 🔒 Locked`\n';
 	}
 
 	if (text == '') text = 'UwU You finished all of your quests! Come back tomorrow! <3';
-
-	return { sql, text };
+	return { text };
 }
 
 function parseQuest(questInfo) {
-	let quest = questJson[questInfo.qname];
-	let reward, text, progress;
+	const quest = questJson[questInfo.qname];
+	let reward;
+	let text;
+	let progress;
 
 	if (questInfo.prize == 'cowoncy') {
 		reward = global.toFancyNum(quest.cowoncy[questInfo.level]) + ' <:cowoncy:416043450337853441>';
@@ -321,13 +282,10 @@ function parseQuest(questInfo) {
 			global.toFancyNum(quest.shards[questInfo.level]) + ' <:weaponshard:655902978712272917>';
 	}
 
-	let count = quest.count[questInfo.level];
-	if (global.isInt(count)) {
-		progress = questInfo.count + '/' + count;
-	} else {
-		progress = questInfo.count + '/3';
-	}
-	let locked = !!questInfo.locked;
+	const count = quest.count[questInfo.level];
+	if (global.isInt(count)) progress = questInfo.count + '/' + count;
+	else progress = questInfo.count + '/3';
+	const locked = !!questInfo.locked;
 
 	switch (questInfo.qname) {
 		case 'hunt':

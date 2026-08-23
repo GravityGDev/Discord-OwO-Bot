@@ -36,11 +36,13 @@ module.exports = new CommandInterface({
 			return;
 		}
 
-		let sql =
-			'INSERT INTO guild (id,count,young) VALUES (' +
-			p.msg.channel.guild.id +
-			',0,0) ON DUPLICATE KEY UPDATE young = 0;';
-		await p.query(sql);
+		const guilds = await p.mongo.collection('guild');
+		const id = String(p.msg.channel.guild.id);
+		await guilds.updateOne(
+			{ id },
+			{ $set: { young: 0 }, $setOnInsert: { id, count: 0 } },
+			{ upsert: true }
+		);
 		p.send(
 			'**⚙ |** Censorship in this guild has been removed! Offensive nicknames from battles will be displayed'
 		);

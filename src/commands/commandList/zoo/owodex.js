@@ -27,11 +27,11 @@ module.exports = new CommandInterface({
 	six: 500,
 
 	execute: async function (p) {
-		let global = p.global,
-			msg = p.msg,
-			args = p.args;
+		const global = p.global;
+		const msg = p.msg;
+		const args = p.args;
 
-		let animal = args[0] ? global.validAnimal(args[0]) : undefined;
+		const animal = args[0] ? global.validAnimal(args[0]) : undefined;
 
 		if (args.length > 1 || args.length == 0) {
 			p.errorMsg(', the correct command is `owo dex {animal}`!', 3000);
@@ -41,9 +41,9 @@ module.exports = new CommandInterface({
 			return;
 		}
 
-		let sql = `SELECT * FROM animal WHERE id = ${msg.author.id} AND name = '${animal.value}';`;
-		let result = await p.query(sql);
-		if (!result[0]) {
+		const animals = await p.mongo.collection('animal');
+		const result = await animals.findOne({ id: String(msg.author.id), name: animal.value });
+		if (!result) {
 			p.errorMsg(', I could not find that animal in your zoo!', 3000);
 			return;
 		}
@@ -58,28 +58,28 @@ module.exports = new CommandInterface({
 			emoji = temp;
 		} else emoji = undefined;
 
-		let rankEmoji = p.animalUtil.getRank(animal.rank).emoji;
-		let points = animal.points;
+		const rankEmoji = p.animalUtil.getRank(animal.rank).emoji;
+		const points = animal.points;
 		let sell = '???';
-		if (result[0].sellcount > 0)
-			sell = animal.price + ' Cowoncy | ' + global.toFancyNum(result[0].sellcount) + ' sold';
+		if (result.sellcount > 0)
+			sell = animal.price + ' Cowoncy | ' + global.toFancyNum(result.sellcount) + ' sold';
 		let sac = '???';
-		if (result[0].saccount > 0)
-			sac = animal.essence + ' Essence | ' + global.toFancyNum(result[0].saccount) + ' killed';
+		if (result.saccount > 0)
+			sac = animal.essence + ' Essence | ' + global.toFancyNum(result.saccount) + ' killed';
 		let alias = 'None';
 		if (animal.alt.length > 0) alias = animal.alt.slice(1).join(', ');
-		let phys = `<:hp:531620120410456064> \`${animal.hp}\` <:att:531616155450998794> \`${animal.att}\` <:pr:531616156222488606> \`${animal.pr}\` `;
-		let mag = `<:wp:531620120976687114> \`${animal.wp}\` <:mag:531616156231139338> \`${animal.mag}\` <:mr:531616156226945024> \`${animal.mr}\` `;
-		let rarity = global.toFancyNum(totalAnimals) + ' total caught';
+		const phys = `<:hp:531620120410456064> \`${animal.hp}\` <:att:531616155450998794> \`${animal.att}\` <:pr:531616156222488606> \`${animal.pr}\` `;
+		const mag = `<:wp:531620120976687114> \`${animal.wp}\` <:mag:531616156231139338> \`${animal.mag}\` <:mr:531616156226945024> \`${animal.mr}\` `;
+		const rarity = global.toFancyNum(totalAnimals) + ' total caught';
 		let nickname = '';
-		if (result[0].nickname) nickname = '**Nickname:** ' + result[0].nickname + '\n';
+		if (result.nickname) nickname = '**Nickname:** ' + result.nickname + '\n';
 		let desc = "*No description created\nHave a fun/creative description?\nUse 'owo feedback'!*";
 		if (animal.description) {
 			desc = '*' + animal.description.trim() + '*';
 			let ids = desc.match(/\?[0-9]+\?/g);
 			for (let i in ids) {
-				let descID = ids[i].match(/[0-9]+/);
-				let tempUser = await p.fetch.getUser(descID[0]);
+				const descID = ids[i].match(/[0-9]+/);
+				const tempUser = await p.fetch.getUser(descID[0]);
 				desc = desc
 					.replace(
 						' ?' + descID + '? \n\n',
@@ -112,8 +112,8 @@ module.exports = new CommandInterface({
 			}
 			ids = desc.match(/\?[0-9]+\!/g);
 			for (let i in ids) {
-				let descID = ids[i].match(/[0-9]+/);
-				let tempUser = await p.fetch.getUser(descID[0]);
+				const descID = ids[i].match(/[0-9]+/);
+				const tempUser = await p.fetch.getUser(descID[0]);
 				const username = tempUser ? p.getUniqueName(tempUser) : 'A User';
 				desc = desc
 					.replace(' ?' + descID + '! \n\n', '* ***' + username + '*** \n\n*')
@@ -127,7 +127,7 @@ module.exports = new CommandInterface({
 		}
 		desc = desc.replace(/\n\*\*$/, '');
 
-		let embed = {
+		const embed = {
 			title: (animal.uni ? animal.uni : animal.value) + ' ' + animal.name,
 			color: p.config.embed_color,
 			thumbnail: {
@@ -138,9 +138,9 @@ module.exports = new CommandInterface({
 				'\n\n' +
 				nickname +
 				'**Count:** ' +
-				result[0].count +
+				result.count +
 				'/' +
-				result[0].totalcount +
+				result.totalcount +
 				'\n**Rank:** ' +
 				rankEmoji +
 				' ' +

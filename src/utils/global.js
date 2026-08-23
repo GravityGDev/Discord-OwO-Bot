@@ -394,8 +394,9 @@ exports.selectRandom = function (array, total) {
 };
 
 exports.getStealButton = async function (p, withComponent) {
-	const sql = `SELECT emoji_steal.guild FROM emoji_steal INNER JOIN user ON emoji_steal.uid = user.uid WHERE id = ${p.msg.author.id};`;
-	const canSteal = (await p.query(sql))[0]?.guild;
+	const uid = await cacheUtil.getUid(p.msg.author.id);
+	const emojiSteal = await p.mongo.collection('emoji_steal');
+	const canSteal = (await emojiSteal.findOne({ uid }, { projection: { guild: 1 } }))?.guild;
 	if (!canSteal) {
 		return;
 	}
