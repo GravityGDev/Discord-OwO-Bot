@@ -5,39 +5,21 @@
  * For more information, see README.md and LICENSE
  */
 
-const request = require('request');
 const rings = require('../../../../data/rings.json');
 const levels = require('../../../../utils/levels.js');
+const localCardRenderer = require('../../../../utils/localCardRenderer.js');
+const wallpaperUtil = require('../../../../utils/wallpaper.js');
 const animalUtil = require('../../battle/util/animalUtil.js');
 const offsetID = 200;
 const settingEmoji = '⚙';
 
 var display = (exports.display = async function (p, user) {
-	let info = await generateJson(p, user);
-	info.password = process.env.GEN_PASS;
-
 	try {
-		return new Promise((resolve, _reject) => {
-			request(
-				{
-					method: 'POST',
-					uri: `${process.env.GEN_API_HOST}/profilegen`,
-					json: true,
-					body: info,
-				},
-				(error, res, body) => {
-					if (error) {
-						resolve('');
-						return;
-					}
-					if (res.statusCode == 200) resolve(body);
-					else resolve('');
-				}
-			);
-		});
+		const info = await generateJson(p, user);
+		return await localCardRenderer.renderProfileCard(info);
 	} catch (err) {
-		console.error(err);
-		return '';
+		console.error('[ProfileCard] Failed to render local profile image:', err);
+		return null;
 	}
 });
 
@@ -80,6 +62,7 @@ async function generateJson(p, user) {
 	return {
 		theme: {
 			background: background.id,
+			backgroundURL: background.url,
 			name_color: background.color,
 			accent,
 			accent2,
@@ -101,9 +84,11 @@ async function generateJson(p, user) {
 
 async function getRank(p, user) {
 	let rank = p.global.toFancyNum(await levels.getUserRank(user.id));
+	if (!rank || rank == 'NaN') rank = 'Last';
+	else rank = '#' + rank;
 	return {
 		img: 'trophy.png',
-		text: '#' + rank,
+		text: rank,
 	};
 }
 
@@ -132,7 +117,7 @@ async function getMarriage(p, user) {
 	let tag = '';
 	if (!so) so = 'Someone';
 	else so = p.getName(so);
-	return { img: 'ring_' + ring.id + '.png', text: so, tag };
+	return { img: ring ? 'ring_' + ring.id + '.png' : 'ring.png', text: so, tag };
 }
 
 function shortenInt(value) {
@@ -192,12 +177,19 @@ async function getBackground(p, user) {
 	const profiles = await p.mongo.collection('user_profile');
 	const backgrounds = await p.mongo.collection('backgrounds');
 	const storedUser = await users.findOne({ id: String(user.id) }, { projection: { uid: 1 } });
-	if (!storedUser) return { id: 1 };
-	const profile = await profiles.findOne({ uid: storedUser.uid }, { projection: { bid: 1 } });
-	if (!profile?.bid) return { id: 1 };
-	const background = await backgrounds.findOne({ bid: profile.bid });
-	if (!background) return { id: 1 };
-	return { id: background.bid, color: background.name_color };
+	let bid = 1;
+	if (storedUser) {
+		const profile = await profiles.findOne({ uid: storedUser.uid }, { projection: { bid: 1 } });
+		if (profile && profile.bid !== undefined && profile.bid !== null) bid = profile.bid;
+	}
+
+	const background = await backgrounds.findOne({ bid });
+	if (!background) return { id: bid };
+	return {
+		id: background.bid,
+		color: background.name_color,
+		url: wallpaperUtil.getUrl(background),
+	};
 }
 
 async function getInfo(p, user) {
@@ -222,14 +214,11 @@ async function getInfo(p, user) {
 
 var displayProfile = (exports.displayProfile = async function (p, user) {
 	try {
-		let uuid = await display(p, user);
-		let url = `${process.env.GEN_HOST}/profile/${uuid}.png`;
-		let data = await p.DataResolver.urlToBuffer(url);
-		if (uuid) {
-			await p.send('', null, { file: data, name: 'profile.png' });
-		} else throw 'Not found';
+		const data = await display(p, user);
+		if (!data) throw new Error('Local profile renderer returned no image');
+		await p.send('', null, { file: data, name: 'profile.png' });
 	} catch (e) {
-		console.error(e);
+		console.error('[ProfileCard] Failed to send profile image:', e);
 		p.errorMsg(', failed to create profile image... Try again later :(', 3000);
 	}
 });
