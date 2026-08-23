@@ -78,18 +78,22 @@ async function getRank(p, user, opt) {
 }
 
 async function getBackground(p, user) {
-	const users = await p.mongo.collection('user');
+	const uid = await p.global.getUid(user.id);
 	const profiles = await p.mongo.collection('user_profile');
 	const backgrounds = await p.mongo.collection('backgrounds');
-	const storedUser = await users.findOne({ id: String(user.id) }, { projection: { uid: 1 } });
+	const profile = await profiles.findOne({ uid }, { projection: { bid: 1 } });
+
 	let bid = 1;
-	if (storedUser) {
-		const profile = await profiles.findOne({ uid: storedUser.uid }, { projection: { bid: 1 } });
-		if (profile && profile.bid !== undefined && profile.bid !== null) bid = profile.bid;
-	}
+	if (profile?.bid !== undefined && profile?.bid !== null) bid = profile.bid;
 
 	const background = await backgrounds.findOne({ bid });
-	if (!background) return { id: bid };
+	if (!background) {
+		return {
+			id: bid,
+			url: wallpaperUtil.getUrl({ bid }),
+		};
+	}
+
 	return {
 		id: background.bid,
 		color: background.name_color,
