@@ -4,7 +4,7 @@ services:
     runtime: node
     region: frankfurt
     branch: mongodb-migration
-    autoDeployTrigger: checksPass
+    autoDeployTrigger: commit
     buildCommand: npm ci --no-audit --no-fund
     preDeployCommand: npm run seed:mongo-static
     startCommand: npm run start:checked
